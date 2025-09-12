@@ -1,22 +1,26 @@
+import os
 import pandas as pd
 import requests
 import base64
-import os
 import json
+from flask import Flask, render_template, request, jsonify
 
-# Configuration
-BITBUCKET_API_BASE = "https://bitbucket.crm.com/rest/api/latest"  # Bitbucket Server API
-USERNAME = "your-username"  # Replace with your Bitbucket Server username
-PASSWORD = "your-password"  # Replace with your Bitbucket Server password
-EXCEL_FILE = "repos.xlsx"  # Input Excel file
-OUTPUT_FILE = "repo_python_files.xlsx"  # Output Excel file
-FILES_LIMIT = 100  # Limit for files API
+app = Flask(__name__)
+
+# Load config from env vars
+BITBUCKET_API_BASE = os.getenv("BITBUCKET_API_BASE", "https://bitbucket.crm.com/rest/api/latest")
+USERNAME = os.getenv("BITBUCKET_USERNAME")
+PASSWORD = os.getenv("BITBUCKET_PASSWORD")
+EXCEL_FILE = "repos.xlsx"
+FILES_LIMIT = 100
+
+if not USERNAME or not PASSWORD:
+    raise ValueError("BITBUCKET_USERNAME and BITBUCKET_PASSWORD must be set in environment variables.")
 
 # Encode credentials for Basic Authentication
 credentials = f"{USERNAME}:{PASSWORD}"
 auth_header = f"Basic {base64.b64encode(credentials.encode()).decode()}"
 
-# Headers for API requests
 headers = {
     "Authorization": auth_header,
     "Accept": "application/json"
@@ -25,130 +29,150 @@ headers = {
 def get_latest_tag(project_key, repo_slug):
     """Get the latest tag ID from the repository's tags endpoint."""
     try:
-        # API to list tags (sorted by name descending for latest)
         url = f"{BITBUCKET_API_BASE}/projects/{project_key}/repos/{repo_slug}/tags?orderBy=NAME_DESC&limit=1"
         response = requests.get(url, headers=headers, timeout=10)
-        print(f"Tags response status for {project_key}/{repo_slug}: {response.status_code}")
         if response.status_code == 200:
             try:
                 data = response.json()
                 if not isinstance(data, dict):
-                    print(f"Non-dict tags response for {project_key}/{repo_slug}: {response.text}")
                     return None
                 values = data.get("values", [])
                 if not values:
-                    print(f"No tags found for {project_key}/{repo_slug}")
                     return None
                 latest_tag = values[0].get("id")  # e.g., "refs/tags/v1.4.4"
-                if latest_tag:
-                    print(f"Latest tag for {project_key}/{repo_slug}: {latest_tag}")
-                    return latest_tag
-                return None
+                return latest_tag
             except json.JSONDecodeError:
-                print(f"Non-JSON tags response for {project_key}/{repo_slug} (Status {response.status_code}): {response.text}")
                 return None
-        else:
-            print(f"Error fetching tags for {project_key}/{repo_slug} (Status {response.status_code}): {response.text}")
-            return None
-    except requests.exceptions.RequestException as e:
-        print(f"Request exception fetching tags for {project_key}/{repo_slug}: {e}")
+        return None
+    except requests.exceptions.RequestException:
         return None
 
-def has_python_files(project_key, repo_slug, latest_tag):
-    """Check if .py files exist in the first 100 files at the specified tag or default branch."""
+def get_file_content(project_key, repo_slug, file_path, ref):
+    """Get raw content of a specific file at the given ref (tag or branch)."""
     try:
-        # Build files URL with limit and at=latest_tag if available
-        url = f"{BITBUCKET_API_BASE}/projects/{project_key}/repos/{repo_slug}/files?limit={FILES_LIMIT}"
-        if latest_tag:
-            url += f"&at={latest_tag}"
+        url = f"{BITBUCKET_API_BASE}/projects/{project_key}/repos/{repo_slug}/raw/{file_path}?at={ref}"
         response = requests.get(url, headers=headers, timeout=10)
-        print(f"Files response status for {project_key}/{repo_slug} (at={latest_tag or 'default'}): {response.status_code}")
+        if response.status_code == 200:
+            return response.text
+        return None
+    except requests.exceptions.RequestException:
+        return None
+
+def search_file_content(project_key, repo_slug, keyword, ref):
+    """Search for keyword in file contents at the given ref."""
+    try:
+        url = f"{BITBUCKET_API_BASE}/projects/{project_key}/repos/{repo_slug}/files?limit={FILES_LIMIT}"
+        if ref:
+            url += f"&at={ref}"
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             try:
                 data = response.json()
                 if not isinstance(data, dict):
-                    print(f"Non-dict files response for {project_key}/{repo_slug}: {response.text}")
-                    return False
-                # Check for empty repository
+                    return []
                 values = data.get("values", [])
-                if not values:
-                    print(f"Repository {project_key}/{repo_slug} is empty or has no files")
-                    return False
-                # Check files in values[] (strings, not dicts)
+                matches = []
                 for file_path in values:
                     if not isinstance(file_path, str):
-                        print(f"Invalid file path for {project_key}/{repo_slug}: {file_path}")
                         continue
-                    if file_path.endswith(".py"):
-                        return True
-                return False
+                    content = get_file_content(project_key, repo_slug, file_path, ref or 'default')
+                    if content and keyword.lower() in content.lower():
+                        # Extract matching lines for preview
+                        lines = [line for line in content.split('\n') if keyword.lower() in line.lower()]
+                        matches.append({
+                            "file_path": file_path,
+                            "matching_lines": lines[:5]  # Limit to first 5 lines
+                        })
+                return matches
             except json.JSONDecodeError:
-                print(f"Non-JSON files response for {project_key}/{repo_slug} (Status {response.status_code}): {response.text}")
-                return False
-        else:
-            print(f"Error fetching files for {project_key}/{repo_slug} (Status {response.status_code}): {response.text}")
-            return False
-    except requests.exceptions.RequestException as e:
-        print(f"Request exception fetching files for {project_key}/{repo_slug}: {e}")
-        return False
+                return []
+        return []
+    except requests.exceptions.RequestException:
+        return []
 
-def main():
-    # Read Excel file
-    try:
-        df = pd.read_excel(EXCEL_FILE)
-    except Exception as e:
-        print(f"Error reading Excel file: {e}")
-        return
-
-    # Check for required columns
-    required_columns = ["PROJECT", "REPO"]
-    if not all(col in df.columns for col in required_columns):
-        print(f"Excel file must contain columns: {', '.join(required_columns)}")
-        return
-
-    # Lists to store results
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    keyword = ""
     results = []
+    if request.method == 'POST':
+        keyword = request.form.get('keyword', '').strip()
+        if keyword:
+            # Load repos from Excel
+            df = pd.read_excel(EXCEL_FILE)
+            if 'PROJECT' in df.columns and 'REPO' in df.columns:
+                for _, row in df.iterrows():
+                    project_key = row["PROJECT"]
+                    repo_slug = row["REPO"]
+                    if pd.isna(project_key) or pd.isna(repo_slug):
+                        continue
+                    latest_tag = get_latest_tag(project_key, repo_slug)
+                    ref = latest_tag if latest_tag else None
+                    matches = search_file_content(project_key, repo_slug, keyword, ref)
+                    if matches:
+                        results.append({
+                            "project": project_key,
+                            "repo": repo_slug,
+                            "tag": latest_tag or "default branch",
+                            "matches": matches
+                        })
+    return render_template('index.html', keyword=keyword, results=results)
 
-    # Process each row
-    for _, row in df.iterrows():
-        project_key = row["PROJECT"]
-        repo_slug = row["REPO"]
-        if pd.isna(project_key) or pd.isna(repo_slug):
-            print(f"Invalid project or repo: {project_key}/{repo_slug}")
-            results.append({
-                "PROJECT": project_key,
-                "REPO": repo_slug,
-                "Has_Python_Files": False,
-                "Latest_Tag": None
-            })
-            continue
+if __name__ == '__main__':
+    app.run(debug=True)
 
-        # Get latest tag
-        latest_tag = get_latest_tag(project_key, repo_slug)
 
-        # Check for .py files using latest tag or default
-        has_python = has_python_files(project_key, repo_slug, latest_tag)
 
-        results.append({
-            "PROJECT": project_key,
-            "REPO": repo_slug,
-            "Has_Python_Files": has_python,
-            "Latest_Tag": latest_tag
-        })
 
-    # Create a DataFrame with results
-    result_df = pd.DataFrame(results)
-    
-    # Save results to a new Excel file
-    try:
-        result_df.to_excel(OUTPUT_FILE, index=False)
-        print(f"Results saved to {OUTPUT_FILE}")
-    except Exception as e:
-        print(f"Error saving results to Excel: {e}")
 
-    # Print results
-    print("\nRepository Python Files Check:")
-    print(result_df)
 
-if __name__ == "__main__":
-    main()
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bitbucket Content Search</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Bitbucket Repository Search</h1>
+        <form method="POST" class="search-form">
+            <input type="text" name="keyword" placeholder="Enter keyword to search in file contents..." value="{{ keyword }}" required>
+            <button type="submit">Search</button>
+        </form>
+        
+        {% if keyword %}
+        <div class="results-header">
+            <h2>Search Results for "{{ keyword }}" ({{ results|length }} repositories found)</h2>
+        </div>
+        
+        {% if results %}
+        <div class="results">
+            {% for result in results %}
+            <div class="repo-result">
+                <h3>Repository: {{ result.project }} / {{ result.repo }} (Tag: {{ result.tag }})</h3>
+                <ul class="file-matches">
+                    {% for match in result.matches %}
+                    <li class="file-match">
+                        <strong>File: {{ match.file_path }}</strong>
+                        <div class="preview">
+                            <h4>Matching Lines (Preview):</h4>
+                            <ul>
+                                {% for line in match.matching_lines %}
+                                <li>"{{ line }}"</li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="no-results">No matches found for "{{ keyword }}". Try a different keyword!</p>
+        {% endif %}
+        {% endif %}
+    </div>
+</body>
+</html>
