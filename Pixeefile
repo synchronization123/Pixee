@@ -1,0 +1,154 @@
+import pandas as pd
+import requests
+import base64
+import os
+import json
+
+# Configuration
+BITBUCKET_API_BASE = "https://bitbucket.crm.com/rest/api/latest"  # Bitbucket Server API
+USERNAME = "your-username"  # Replace with your Bitbucket Server username
+PASSWORD = "your-password"  # Replace with your Bitbucket Server password
+EXCEL_FILE = "repos.xlsx"  # Input Excel file
+OUTPUT_FILE = "repo_python_files.xlsx"  # Output Excel file
+FILES_LIMIT = 100  # Limit for files API
+
+# Encode credentials for Basic Authentication
+credentials = f"{USERNAME}:{PASSWORD}"
+auth_header = f"Basic {base64.b64encode(credentials.encode()).decode()}"
+
+# Headers for API requests
+headers = {
+    "Authorization": auth_header,
+    "Accept": "application/json"
+}
+
+def get_latest_tag(project_key, repo_slug):
+    """Get the latest tag ID from the repository's tags endpoint."""
+    try:
+        # API to list tags (sorted by name descending for latest)
+        url = f"{BITBUCKET_API_BASE}/projects/{project_key}/repos/{repo_slug}/tags?orderBy=NAME_DESC&limit=1"
+        response = requests.get(url, headers=headers, timeout=10)
+        print(f"Tags response status for {project_key}/{repo_slug}: {response.status_code}")
+        if response.status_code == 200:
+            try:
+                data = response.json()
+                if not isinstance(data, dict):
+                    print(f"Non-dict tags response for {project_key}/{repo_slug}: {response.text}")
+                    return None
+                values = data.get("values", [])
+                if not values:
+                    print(f"No tags found for {project_key}/{repo_slug}")
+                    return None
+                latest_tag = values[0].get("id")  # e.g., "refs/tags/v1.4.4"
+                if latest_tag:
+                    print(f"Latest tag for {project_key}/{repo_slug}: {latest_tag}")
+                    return latest_tag
+                return None
+            except json.JSONDecodeError:
+                print(f"Non-JSON tags response for {project_key}/{repo_slug} (Status {response.status_code}): {response.text}")
+                return None
+        else:
+            print(f"Error fetching tags for {project_key}/{repo_slug} (Status {response.status_code}): {response.text}")
+            return None
+    except requests.exceptions.RequestException as e:
+        print(f"Request exception fetching tags for {project_key}/{repo_slug}: {e}")
+        return None
+
+def has_python_files(project_key, repo_slug, latest_tag):
+    """Check if .py files exist in the first 100 files at the specified tag or default branch."""
+    try:
+        # Build files URL with limit and at=latest_tag if available
+        url = f"{BITBUCKET_API_BASE}/projects/{project_key}/repos/{repo_slug}/files?limit={FILES_LIMIT}"
+        if latest_tag:
+            url += f"&at={latest_tag}"
+        response = requests.get(url, headers=headers, timeout=10)
+        print(f"Files response status for {project_key}/{repo_slug} (at={latest_tag or 'default'}): {response.status_code}")
+        if response.status_code == 200:
+            try:
+                data = response.json()
+                if not isinstance(data, dict):
+                    print(f"Non-dict files response for {project_key}/{repo_slug}: {response.text}")
+                    return False
+                # Check for empty repository
+                values = data.get("values", [])
+                if not values:
+                    print(f"Repository {project_key}/{repo_slug} is empty or has no files")
+                    return False
+                # Check files in values[] (strings, not dicts)
+                for file_path in values:
+                    if not isinstance(file_path, str):
+                        print(f"Invalid file path for {project_key}/{repo_slug}: {file_path}")
+                        continue
+                    if file_path.endswith(".py"):
+                        return True
+                return False
+            except json.JSONDecodeError:
+                print(f"Non-JSON files response for {project_key}/{repo_slug} (Status {response.status_code}): {response.text}")
+                return False
+        else:
+            print(f"Error fetching files for {project_key}/{repo_slug} (Status {response.status_code}): {response.text}")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"Request exception fetching files for {project_key}/{repo_slug}: {e}")
+        return False
+
+def main():
+    # Read Excel file
+    try:
+        df = pd.read_excel(EXCEL_FILE)
+    except Exception as e:
+        print(f"Error reading Excel file: {e}")
+        return
+
+    # Check for required columns
+    required_columns = ["PROJECT", "REPO"]
+    if not all(col in df.columns for col in required_columns):
+        print(f"Excel file must contain columns: {', '.join(required_columns)}")
+        return
+
+    # Lists to store results
+    results = []
+
+    # Process each row
+    for _, row in df.iterrows():
+        project_key = row["PROJECT"]
+        repo_slug = row["REPO"]
+        if pd.isna(project_key) or pd.isna(repo_slug):
+            print(f"Invalid project or repo: {project_key}/{repo_slug}")
+            results.append({
+                "PROJECT": project_key,
+                "REPO": repo_slug,
+                "Has_Python_Files": False,
+                "Latest_Tag": None
+            })
+            continue
+
+        # Get latest tag
+        latest_tag = get_latest_tag(project_key, repo_slug)
+
+        # Check for .py files using latest tag or default
+        has_python = has_python_files(project_key, repo_slug, latest_tag)
+
+        results.append({
+            "PROJECT": project_key,
+            "REPO": repo_slug,
+            "Has_Python_Files": has_python,
+            "Latest_Tag": latest_tag
+        })
+
+    # Create a DataFrame with results
+    result_df = pd.DataFrame(results)
+    
+    # Save results to a new Excel file
+    try:
+        result_df.to_excel(OUTPUT_FILE, index=False)
+        print(f"Results saved to {OUTPUT_FILE}")
+    except Exception as e:
+        print(f"Error saving results to Excel: {e}")
+
+    # Print results
+    print("\nRepository Python Files Check:")
+    print(result_df)
+
+if __name__ == "__main__":
+    main()
