@@ -1,4 +1,3 @@
-import os
 import pandas as pd
 import requests
 import base64
@@ -7,15 +6,12 @@ from flask import Flask, render_template, request, jsonify
 
 app = Flask(__name__)
 
-# Load config from env vars
-BITBUCKET_API_BASE = os.getenv("BITBUCKET_API_BASE", "https://bitbucket.crm.com/rest/api/latest")
-USERNAME = os.getenv("BITBUCKET_USERNAME")
-PASSWORD = os.getenv("BITBUCKET_PASSWORD")
+# Hardcoded credentials (replace with your actual values)
+BITBUCKET_API_BASE = "https://bitbucket.crm.com/rest/api/latest"
+USERNAME = "your-username"  # Replace with your Bitbucket Server username
+PASSWORD = "your-password"  # Replace with your Bitbucket Server password
 EXCEL_FILE = "repos.xlsx"
 FILES_LIMIT = 100
-
-if not USERNAME or not PASSWORD:
-    raise ValueError("BITBUCKET_USERNAME and BITBUCKET_PASSWORD must be set in environment variables.")
 
 # Encode credentials for Basic Authentication
 credentials = f"{USERNAME}:{PASSWORD}"
@@ -119,60 +115,3 @@ def index():
 
 if __name__ == '__main__':
     app.run(debug=True)
-
-
-
-
-
-
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bitbucket Content Search</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
-<body>
-    <div class="container">
-        <h1>Bitbucket Repository Search</h1>
-        <form method="POST" class="search-form">
-            <input type="text" name="keyword" placeholder="Enter keyword to search in file contents..." value="{{ keyword }}" required>
-            <button type="submit">Search</button>
-        </form>
-        
-        {% if keyword %}
-        <div class="results-header">
-            <h2>Search Results for "{{ keyword }}" ({{ results|length }} repositories found)</h2>
-        </div>
-        
-        {% if results %}
-        <div class="results">
-            {% for result in results %}
-            <div class="repo-result">
-                <h3>Repository: {{ result.project }} / {{ result.repo }} (Tag: {{ result.tag }})</h3>
-                <ul class="file-matches">
-                    {% for match in result.matches %}
-                    <li class="file-match">
-                        <strong>File: {{ match.file_path }}</strong>
-                        <div class="preview">
-                            <h4>Matching Lines (Preview):</h4>
-                            <ul>
-                                {% for line in match.matching_lines %}
-                                <li>"{{ line }}"</li>
-                                {% endfor %}
-                            </ul>
-                        </div>
-                    </li>
-                    {% endfor %}
-                </ul>
-            </div>
-            {% endfor %}
-        </div>
-        {% else %}
-        <p class="no-results">No matches found for "{{ keyword }}". Try a different keyword!</p>
-        {% endif %}
-        {% endif %}
-    </div>
-</body>
-</html>
