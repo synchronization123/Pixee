@@ -2,9 +2,11 @@ import pandas as pd
 import requests
 import base64
 import json
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, flash, redirect, url_for
+import traceback  # For error logging
 
 app = Flask(__name__)
+app.secret_key = 'your-secret-key'  # Required for flash messages
 
 # Hardcoded credentials (replace with your actual values)
 BITBUCKET_API_BASE = "https://bitbucket.crm.com/rest/api/latest"
@@ -31,6 +33,7 @@ def get_latest_tag(project_key, repo_slug):
             try:
                 data = response.json()
                 if not isinstance(data, dict):
+                    print(f"Non-dict tags response for {project_key}/{repo_slug}: {response.text}")  # Console log
                     return None
                 values = data.get("values", [])
                 if not values:
@@ -38,9 +41,13 @@ def get_latest_tag(project_key, repo_slug):
                 latest_tag = values[0].get("id")  # e.g., "refs/tags/v1.4.4"
                 return latest_tag
             except json.JSONDecodeError:
+                print(f"Non-JSON tags response for {project_key}/{repo_slug} (Status {response.status_code}): {response.text}")  # Console log
                 return None
-        return None
-    except requests.exceptions.RequestException:
+        else:
+            print(f"Error fetching tags for {project_key}/{repo_slug} (Status {response.status_code}): {response.text}")  # Console log
+            return None
+    except requests.exceptions.RequestException as e:
+        print(f"Request exception fetching tags for {project_key}/{repo_slug}: {e}")  # Console log
         return None
 
 def get_file_content(project_key, repo_slug, file_path, ref):
@@ -65,6 +72,7 @@ def search_file_content(project_key, repo_slug, keyword, ref):
             try:
                 data = response.json()
                 if not isinstance(data, dict):
+                    print(f"Non-dict files response for {project_key}/{repo_slug}: {response.text}")  # Console log
                     return []
                 values = data.get("values", [])
                 matches = []
@@ -81,9 +89,13 @@ def search_file_content(project_key, repo_slug, keyword, ref):
                         })
                 return matches
             except json.JSONDecodeError:
+                print(f"Non-JSON files response for {project_key}/{repo_slug} (Status {response.status_code}): {response.text}")  # Console log
                 return []
-        return []
-    except requests.exceptions.RequestException:
+        else:
+            print(f"Error fetching files for {project_key}/{repo_slug} (Status {response.status_code}): {response.text}")  # Console log
+            return []
+    except requests.exceptions.RequestException as e:
+        print(f"Request exception fetching files for {project_key}/{repo_slug}: {e}")  # Console log
         return []
 
 @app.route('/', methods=['GET', 'POST'])
@@ -93,25 +105,228 @@ def index():
     if request.method == 'POST':
         keyword = request.form.get('keyword', '').strip()
         if keyword:
-            # Load repos from Excel
-            df = pd.read_excel(EXCEL_FILE)
-            if 'PROJECT' in df.columns and 'REPO' in df.columns:
-                for _, row in df.iterrows():
-                    project_key = row["PROJECT"]
-                    repo_slug = row["REPO"]
-                    if pd.isna(project_key) or pd.isna(repo_slug):
-                        continue
-                    latest_tag = get_latest_tag(project_key, repo_slug)
-                    ref = latest_tag if latest_tag else None
-                    matches = search_file_content(project_key, repo_slug, keyword, ref)
-                    if matches:
-                        results.append({
-                            "project": project_key,
-                            "repo": repo_slug,
-                            "tag": latest_tag or "default branch",
-                            "matches": matches
-                        })
+            try:
+                # Load repos from Excel
+                df = pd.read_excel(EXCEL_FILE)
+                if 'PROJECT' in df.columns and 'REPO' in df.columns:
+                    for _, row in df.iterrows():
+                        project_key = row["PROJECT"]
+                        repo_slug = row["REPO"]
+                        if pd.isna(project_key) or pd.isna(repo_slug):
+                            continue
+                        latest_tag = get_latest_tag(project_key, repo_slug)
+                        ref = latest_tag if latest_tag else None
+                        matches = search_file_content(project_key, repo_slug, keyword, ref)
+                        if matches:
+                            results.append({
+                                "project": project_key,
+                                "repo": repo_slug,
+                                "tag": latest_tag or "default branch",
+                                "matches": matches
+                            })
+            except Exception as e:
+                print(f"Error processing search for keyword '{keyword}': {str(e)}")  # Console log
+                print(traceback.format_exc())  # Full traceback to console
+                flash(f"Error during search: {str(e)}. Check console for details.", 'error')  # User-friendly message
+                return redirect(url_for('index'))
     return render_template('index.html', keyword=keyword, results=results)
+
+@app.errorhandler(500)
+def internal_error(error):
+    print(f"500 Internal Server Error: {str(error)}")  # Console log
+    print(traceback.format_exc())  # Full traceback to console
+    return render_template('error.html'), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
+
+
+
+
+------
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bitbucket Content Search</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container mt-5">
+        <h1 class="text-center mb-4 text-primary">Bitbucket Repository Search</h1>
+        <form method="POST" class="search-form row justify-content-center mb-5" id="searchForm">
+            <div class="col-md-8">
+                <div class="input-group">
+                    <input type="text" class="form-control form-control-lg" name="keyword" placeholder="Enter keyword to search in file contents..." value="{{ keyword }}" required>
+                    <button class="btn btn-primary btn-lg" type="submit">Search</button>
+                </div>
+            </div>
+        </form>
+        
+        <!-- Loading Spinner -->
+        <div id="loadingSpinner" class="text-center d-none">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Searching...</span>
+            </div>
+            <p class="mt-2">Searching repositories... Please wait.</p>
+        </div>
+        
+        <!-- Flash Messages for Errors -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ 'danger' if category == 'error' else 'info' }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        
+        {% if keyword %}
+        <div class="results-header">
+            <h2 class="text-start">Search Results for "{{ keyword }}" ({{ results|length }} repositories found)</h2>
+        </div>
+        
+        {% if results %}
+        <div class="results">
+            {% for result in results %}
+            <div class="card mb-3 repo-result">
+                <div class="card-header bg-primary text-white">
+                    <h5 class="mb-0">Repository: {{ result.project }} / {{ result.repo }} (Tag: {{ result.tag }})</h5>
+                </div>
+                <div class="card-body">
+                    <ul class="list-group list-group-flush">
+                        {% for match in result.matches %}
+                        <li class="list-group-item file-match">
+                            <strong class="d-block mb-2">File: {{ match.file_path }}</strong>
+                            <div class="preview">
+                                <h6 class="mb-2">Matching Lines (Preview):</h6>
+                                <ul class="list-unstyled">
+                                    {% for line in match.matching_lines %}
+                                    <li class="small text-muted">"{{ line }}"</li>
+                                    {% endfor %}
+                                </ul>
+                            </div>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="alert alert-info text-center">
+            <p class="no-results mb-0">No matches found for "{{ keyword }}". Try a different keyword!</p>
+        </div>
+        {% endif %}
+        {% endif %}
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Client-side error handling and loading spinner
+        document.getElementById('searchForm').addEventListener('submit', function(e) {
+            const keyword = document.querySelector('input[name="keyword"]').value.trim();
+            if (!keyword) {
+                e.preventDefault();
+                alert('Please enter a keyword to search.');
+                console.error('Search error: Empty keyword');  // Console log
+                return false;
+            }
+            // Show loading spinner
+            document.getElementById('loadingSpinner').classList.remove('d-none');
+            console.log('Search initiated for keyword:', keyword);  // Console log
+        });
+
+        // Handle page load (hide spinner if somehow visible)
+        window.addEventListener('load', function() {
+            document.getElementById('loadingSpinner').classList.add('d-none');
+            console.log('Page loaded successfully');  // Console log
+        });
+
+        // Global error handler for uncaught errors
+        window.onerror = function(msg, url, lineNo, columnNo, error) {
+            console.error('Global error:', msg, 'at', url, 'line', lineNo, 'column', columnNo, error);
+            return false;  // Prevent default error handling
+        };
+    </script>
+</body>
+</html>
+
+
+
+------
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error - Bitbucket Search</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-md-6">
+                <div class="alert alert-danger text-center">
+                    <h1>Oops! Something went wrong.</h1>
+                    <p class="lead">An internal error occurred. Check the console for details and try again.</p>
+                    <a href="{{ url_for('index') }}" class="btn btn-primary">Go Back to Search</a>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+
+
+-----
+
+body {
+    background-color: #f8f9fa;
+}
+
+.container {
+    max-width: 900px;
+}
+
+.search-form .input-group {
+    box-shadow: 0 1px 6px rgba(32, 33, 36, 0.28);
+}
+
+.search-form .form-control:focus {
+    border-color: #4285f4;
+    box-shadow: 0 1px 6px rgba(32, 33, 36, 0.28);
+}
+
+.repo-result .card-body {
+    padding: 0;
+}
+
+.file-match {
+    border-bottom: 1px solid #eee;
+}
+
+.file-match:last-child {
+    border-bottom: none;
+}
+
+.preview {
+    margin-top: 10px;
+    font-size: 0.9em;
+}
+
+.preview li {
+    font-family: 'Courier New', monospace;
+    padding: 2px 0;
+    word-break: break-all;
+}
+
+
