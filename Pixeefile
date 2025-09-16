@@ -4,7 +4,7 @@ import time
 
 # Configuration
 SONARQUBE_URL = "https://crm.sonar.com"
-TOKEN = "hsjdjdjdjdjd"  # Provided token
+TOKEN = "hsjdjdjdjdjd"  # Replace with valid token if needed
 INPUT_FILE = "projects.xlsx"
 OUTPUT_FILE = "Hotspots.xlsx"
 
@@ -24,10 +24,14 @@ def fetch_hotspots(project_key):
         url = f"{SONARQUBE_URL}/api/hotspots/search?projectKey={project_key}&ps={page_size}&p={page}"
         try:
             response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 403:
+                print(f"403 Forbidden for project {project_key}, page {page}: {response.text}")
+                break
             response.raise_for_status()
             data = response.json()
 
             if "hotspots" not in data or not data["hotspots"]:
+                print(f"No hotspots found for project {project_key}, page {page}")
                 break
 
             for hotspot in data["hotspots"]:
@@ -57,6 +61,9 @@ def fetch_hotspot_details(hotspot_key):
     url = f"{SONARQUBE_URL}/api/hotspots/show?hotspot={hotspot_key}"
     try:
         response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 403:
+            print(f"403 Forbidden for hotspot {hotspot_key}: {response.text}")
+            return {"login": "", "htmlText": ""}
         response.raise_for_status()
         data = response.json()
         return {
@@ -71,17 +78,15 @@ def main():
     # Step 1: Read projects from projects.xlsx
     try:
         df_projects = pd.read_excel(INPUT_FILE)
-        print("Columns in projects.xlsx:", list(df_projects.columns))  # Debug: Print column names
+        print("Columns in projects.xlsx:", list(df_projects.columns))
 
-        # Normalize column names (strip spaces, try case-insensitive match)
         columns = [col.strip().lower() for col in df_projects.columns]
         if "project" not in columns:
             raise ValueError("Excel file must contain a 'Project' column (case-insensitive, no extra spaces)")
 
-        # Find the actual column name (case-sensitive)
         project_col = next(col for col in df_projects.columns if col.strip().lower() == "project")
         project_keys = df_projects[project_col].dropna().unique()
-        print(f"Found {len(project_keys)} unique project keys")
+        print(f"Found {len(project_keys)} unique project keys: {list(project_keys)}")
 
     except Exception as e:
         print(f"Error reading {INPUT_FILE}: {e}")
@@ -93,6 +98,10 @@ def main():
         print(f"Fetching hotspots for project: {project_key}")
         hotspots = fetch_hotspots(project_key)
         all_hotspots.extend(hotspots)
+
+    if not all_hotspots:
+        print("No hotspots retrieved for any project. Check token permissions or project keys.")
+        return
 
     # Create DataFrame from hotspots
     df_hotspots = pd.DataFrame(all_hotspots, columns=["project", "key", "status", "resolution"])
