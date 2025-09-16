@@ -1,16 +1,113 @@
 import pandas as pd
+import requests
+import time
 
-# File paths (replace 'input.xlsx' with your actual input file path)
-input_file = 'input.xlsx'
-output_file = 'output_filtered.xlsx'
+# Configuration
+SONARQUBE_URL = "https://crm.sonar.com"
+TOKEN = "hsjdjdjdjdjd"  # Provided token
+INPUT_FILE = "projects.xlsx"
+OUTPUT_FILE = "Hotspots.xlsx"
 
-# Read the Excel file
-df = pd.read_excel(input_file)
+# Headers for API requests
+headers = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Accept": "application/json"
+}
 
-# Filter out rows where 'creator' is 'Ram Singh' or blank (NaN or empty string)
-filtered_df = df[~((df['creator'] == 'Ram Singh') | (df['creator'].isna()) | (df['creator'] == ''))]
+def fetch_hotspots(project_key):
+    """Fetch all hotspots for a given project key with pagination."""
+    hotspots = []
+    page = 1
+    page_size = 500
 
-# Save the filtered DataFrame to a new Excel file
-filtered_df.to_excel(output_file, index=False)
+    while True:
+        url = f"{SONARQUBE_URL}/api/hotspots/search?projectKey={project_key}&ps={page_size}&p={page}"
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()  # Raise an error for bad status codes
+            data = response.json()
 
-print(f"Filtered data saved to {output_file}")
+            # Extract hotspots
+            if "hotspots" not in data or not data["hotspots"]:
+                break  # No more hotspots
+
+            for hotspot in data["hotspots"]:
+                hotspots.append({
+                    "project": project_key,
+                    "key": hotspot.get("key", ""),
+                    "status": hotspot.get("status", ""),
+                    "resolution": hotspot.get("resolution", "")
+                })
+
+            # Check if there are more pages
+            total = data.get("paging", {}).get("total", 0)
+            pages = (total + page_size - 1) // page_size
+            if page >= pages:
+                break
+
+            page += 1
+            time.sleep(0.5)  # Avoid overwhelming the server
+
+        except requests.RequestException as e:
+            print(f"Error fetching hotspots for project {project_key}, page {page}: {e}")
+            break
+
+    return hotspots
+
+def fetch_hotspot_details(hotspot_key):
+    """Fetch details for a specific hotspot key."""
+    url = f"{SONARQUBE_URL}/api/hotspots/show?hotspot={hotspot_key}"
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return {
+            "login": data.get("assignee", ""),
+            "htmlText": data.get("message", "")
+        }
+    except requests.RequestException as e:
+        print(f"Error fetching details for hotspot {hotspot_key}: {e}")
+        return {"login": "", "htmlText": ""}
+
+def main():
+    # Step 1: Read projects from projects.xlsx
+    try:
+        df_projects = pd.read_excel(INPUT_FILE)
+        if "Project" not in df_projects.columns:
+            raise ValueError("Excel file must contain a 'Project' column")
+        project_keys = df_projects["Project"].dropna().unique()
+    except Exception as e:
+        print(f"Error reading {INPUT_FILE}: {e}")
+        return
+
+    # Step 2: Fetch hotspots for each project
+    all_hotspots = []
+    for project_key in project_keys:
+        print(f"Fetching hotspots for project: {project_key}")
+        hotspots = fetch_hotspots(project_key)
+        all_hotspots.extend(hotspots)
+
+    # Create DataFrame from hotspots
+    df_hotspots = pd.DataFrame(all_hotspots, columns=["project", "key", "status", "resolution"])
+
+    # Step 3: Fetch details for each hotspot and append login, htmlText
+    df_hotspots["login"] = ""
+    df_hotspots["htmlText"] = ""
+
+    for index, row in df_hotspots.iterrows():
+        hotspot_key = row["key"]
+        print(f"Fetching details for hotspot: {hotspot_key}")
+        details = fetch_hotspot_details(hotspot_key)
+        df_hotspots.at[index, "login"] = details["login"]
+        df_hotspots.at[index, "htmlText"] = details["htmlText"]
+        time.sleep(0.5)  # Avoid overwhelming the server
+
+    # Save to Excel
+    try:
+        df_hotspots.to_excel(OUTPUT_FILE, index=False)
+        print(f"Hotspots saved to {OUTPUT_FILE}")
+    except Exception as e:
+        print(f"Error saving to {OUTPUT_FILE}: {e}")
+
+if __name__ == "__main__":
+    main()
