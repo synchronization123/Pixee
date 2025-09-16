@@ -24,12 +24,11 @@ def fetch_hotspots(project_key):
         url = f"{SONARQUBE_URL}/api/hotspots/search?projectKey={project_key}&ps={page_size}&p={page}"
         try:
             response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()  # Raise an error for bad status codes
+            response.raise_for_status()
             data = response.json()
 
-            # Extract hotspots
             if "hotspots" not in data or not data["hotspots"]:
-                break  # No more hotspots
+                break
 
             for hotspot in data["hotspots"]:
                 hotspots.append({
@@ -39,14 +38,13 @@ def fetch_hotspots(project_key):
                     "resolution": hotspot.get("resolution", "")
                 })
 
-            # Check if there are more pages
             total = data.get("paging", {}).get("total", 0)
             pages = (total + page_size - 1) // page_size
             if page >= pages:
                 break
 
             page += 1
-            time.sleep(0.5)  # Avoid overwhelming the server
+            time.sleep(0.5)
 
         except requests.RequestException as e:
             print(f"Error fetching hotspots for project {project_key}, page {page}: {e}")
@@ -73,9 +71,18 @@ def main():
     # Step 1: Read projects from projects.xlsx
     try:
         df_projects = pd.read_excel(INPUT_FILE)
-        if "Project" not in df_projects.columns:
-            raise ValueError("Excel file must contain a 'Project' column")
-        project_keys = df_projects["Project"].dropna().unique()
+        print("Columns in projects.xlsx:", list(df_projects.columns))  # Debug: Print column names
+
+        # Normalize column names (strip spaces, try case-insensitive match)
+        columns = [col.strip().lower() for col in df_projects.columns]
+        if "project" not in columns:
+            raise ValueError("Excel file must contain a 'Project' column (case-insensitive, no extra spaces)")
+
+        # Find the actual column name (case-sensitive)
+        project_col = next(col for col in df_projects.columns if col.strip().lower() == "project")
+        project_keys = df_projects[project_col].dropna().unique()
+        print(f"Found {len(project_keys)} unique project keys")
+
     except Exception as e:
         print(f"Error reading {INPUT_FILE}: {e}")
         return
@@ -100,7 +107,7 @@ def main():
         details = fetch_hotspot_details(hotspot_key)
         df_hotspots.at[index, "login"] = details["login"]
         df_hotspots.at[index, "htmlText"] = details["htmlText"]
-        time.sleep(0.5)  # Avoid overwhelming the server
+        time.sleep(0.5)
 
     # Save to Excel
     try:
