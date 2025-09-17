@@ -1,0 +1,83 @@
+📢 Patch Validation Update
+
+Legend:
+✅ = Completed / Available
+🚨 = Issue / Blocker
+⏳ = Pending
+➖ = Not Required
+
+
+---
+
+👤 Analyst:
+📅 Date: 
+📌 Patch:
+
+
+---
+
+🔹 Progress & Checks
+
+Changelog Review: 
+🚨 Issues → JIRA-6002 still in In Progress, not moved to Testing
+
+Pull Request(s): 
+✅ JIRA-6001 merged
+🚨 JIRA-6002 PR pending review
+⏳ JIRA-6003 PR created but awaiting merge
+
+Workflow Check: 
+🚨 Issues → Staging environment workflow breaking at Build Verification (medium blocker)
+
+Environment Access:
+Credentials: 🚨 Missing → Access request sent to IT yesterday
+
+URL: ➖ Not Required (validation via static changelog check only for JIRA-6003)
+
+
+
+
+---
+
+🔹 Review & Approvals
+
+Mentor Review: 
+✅ Completed for JIRA-6001, 
+⏳ Pending for JIRA-6002 and JIRA-6003 (Reviewer: Sanjay K.)
+
+Lead Approval: 
+⏳ Pending (Lead – Sneha R.)
+
+
+
+---
+
+🔹 Final Steps
+
+Update & Sign-off: 
+⏳ Pending until mentor & lead approvals are completed
+
+Final Note:
+
+JIRA-6001 → ✅ Validated, ready for sign-off
+
+JIRA-6002 → 🚨 Blocked (not in Testing, PR pending, no credentials)
+
+JIRA-6003 → ⏳ Pending (PR created, mentor review awaited)
+
+ETA for resolution of blockers: +2 days (subject to IT credential approval & DevOps support)
+
+
+
+
+---
+
+🔔 Status Summary
+
+🟢 No Issues → JIRA-6001 validated successfully
+
+🟡 Minor Issues → JIRA-6003 pending mentor review (expected tomorrow)
+
+🟠 Medium Issues → Workflow issue in staging (blocking JIRA-6002 testing)
+
+🔴 Major Issues → Missing environment credentials (cannot proceed with validation for JIRA-6002)
