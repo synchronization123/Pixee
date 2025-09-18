@@ -1,129 +1,31 @@
-import pandas as pd
 import requests
-import time
+from getpass import getpass
 
-# Configuration
-SONARQUBE_URL = "https://crm.sonar.com"
-TOKEN = "hsjdjdjdjdjd"  # Replace with valid token if needed
-INPUT_FILE = "projects.xlsx"
-OUTPUT_FILE = "Hotspots.xlsx"
+# URL of your login form
+LOGIN_URL = "https://crmapp.abx.com/crmyu/jsp/login.jsp"
 
-# Headers for API requests
-headers = {
-    "Authorization": f"Bearer {TOKEN}",
-    "Accept": "application/json"
+# Prompt for credentials
+username = input("Enter username: ")
+password = getpass("Enter password: ")
+
+# Create session to persist cookies
+session = requests.Session()
+
+# Usually login.jsp expects form fields like "username" and "password"
+# (sometimes they are named differently: check HTML form source)
+payload = {
+    "username": username,
+    "password": password
 }
 
-def fetch_hotspots(project_key):
-    """Fetch all hotspots for a given project key with pagination."""
-    hotspots = []
-    page = 1
-    page_size = 500
+# Perform login (POST)
+resp = session.post(LOGIN_URL, data=payload, allow_redirects=True)
 
-    while True:
-        url = f"{SONARQUBE_URL}/api/hotspots/search?projectKey={project_key}&ps={page_size}&p={page}"
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            if response.status_code == 403:
-                print(f"403 Forbidden for project {project_key}, page {page}: {response.text}")
-                break
-            response.raise_for_status()
-            data = response.json()
-
-            if "hotspots" not in data or not data["hotspots"]:
-                print(f"No hotspots found for project {project_key}, page {page}")
-                break
-
-            for hotspot in data["hotspots"]:
-                hotspots.append({
-                    "project": project_key,
-                    "key": hotspot.get("key", ""),
-                    "status": hotspot.get("status", ""),
-                    "resolution": hotspot.get("resolution", "")
-                })
-
-            total = data.get("paging", {}).get("total", 0)
-            pages = (total + page_size - 1) // page_size
-            if page >= pages:
-                break
-
-            page += 1
-            time.sleep(0.5)
-
-        except requests.RequestException as e:
-            print(f"Error fetching hotspots for project {project_key}, page {page}: {e}")
-            break
-
-    return hotspots
-
-def fetch_hotspot_details(hotspot_key):
-    """Fetch details for a specific hotspot key."""
-    url = f"{SONARQUBE_URL}/api/hotspots/show?hotspot={hotspot_key}"
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 403:
-            print(f"403 Forbidden for hotspot {hotspot_key}: {response.text}")
-            return {"login": "", "htmlText": ""}
-        response.raise_for_status()
-        data = response.json()
-        return {
-            "login": data.get("assignee", ""),
-            "htmlText": data.get("message", "")
-        }
-    except requests.RequestException as e:
-        print(f"Error fetching details for hotspot {hotspot_key}: {e}")
-        return {"login": "", "htmlText": ""}
-
-def main():
-    # Step 1: Read projects from projects.xlsx
-    try:
-        df_projects = pd.read_excel(INPUT_FILE)
-        print("Columns in projects.xlsx:", list(df_projects.columns))
-
-        columns = [col.strip().lower() for col in df_projects.columns]
-        if "project" not in columns:
-            raise ValueError("Excel file must contain a 'Project' column (case-insensitive, no extra spaces)")
-
-        project_col = next(col for col in df_projects.columns if col.strip().lower() == "project")
-        project_keys = df_projects[project_col].dropna().unique()
-        print(f"Found {len(project_keys)} unique project keys: {list(project_keys)}")
-
-    except Exception as e:
-        print(f"Error reading {INPUT_FILE}: {e}")
-        return
-
-    # Step 2: Fetch hotspots for each project
-    all_hotspots = []
-    for project_key in project_keys:
-        print(f"Fetching hotspots for project: {project_key}")
-        hotspots = fetch_hotspots(project_key)
-        all_hotspots.extend(hotspots)
-
-    if not all_hotspots:
-        print("No hotspots retrieved for any project. Check token permissions or project keys.")
-        return
-
-    # Create DataFrame from hotspots
-    df_hotspots = pd.DataFrame(all_hotspots, columns=["project", "key", "status", "resolution"])
-
-    # Step 3: Fetch details for each hotspot and append login, htmlText
-    df_hotspots["login"] = ""
-    df_hotspots["htmlText"] = ""
-
-    for index, row in df_hotspots.iterrows():
-        hotspot_key = row["key"]
-        print(f"Fetching details for hotspot: {hotspot_key}")
-        details = fetch_hotspot_details(hotspot_key)
-        df_hotspots.at[index, "login"] = details["login"]
-        df_hotspots.at[index, "htmlText"] = details["htmlText"]
-        time.sleep(0.5)
-
-    # Save to Excel
-    try:
-        df_hotspots.to_excel(OUTPUT_FILE, index=False)
-        print(f"Hotspots saved to {OUTPUT_FILE}")
-    except Exception as e:
-        print(f"Error saving to {OUTPUT_FILE}: {e}")
-
-if __name__ == "__main__":
-    main()
+# Check if login worked
+if resp.url != LOGIN_URL and resp.status_code == 200:
+    print("✅ Login successful!")
+    print("➡️ Redirected to:", resp.url)
+else:
+    print("❌ Login failed or still on login page.")
+    print("Current URL:", resp.url)
+    print("Status Code:", resp.status_code)
