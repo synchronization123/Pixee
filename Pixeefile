@@ -1,92 +1,187 @@
+#!/usr/bin/env python3
+"""
+inspect_and_login.py
+
+Usage:
+    python inspect_and_login.py https://example.com/login
+
+What it does:
+ - GETs the provided URL and finds <form> elements.
+ - Prints detected input field names/types/defaults (including hidden tokens).
+ - If form contains both username & password fields, prompts and attempts login.
+ - If form contains only username (two-step), it will submit username, GET next page, and show fields for password.
+ - Prints final redirected URL (if any) and helpful HTML snippet on failure.
+
+Dependencies:
+    pip install requests beautifulsoup4
+"""
+import sys
 import requests
 from bs4 import BeautifulSoup
 from getpass import getpass
-import sys
 from urllib.parse import urljoin
 
-LOGIN_PAGE = "https://crmapp.abx.com/crmyu/jsp/login.jsp"
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+]
 
-# Use a session to keep cookies (JSESSIONID etc.)
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-})
+COMMON_USERNAMES = {"username","user","login","email","j_username","userid"}
+COMMON_PASSWORDS = {"password","pass","j_password"}
 
-def fetch_login_form():
-    r = session.get(LOGIN_PAGE, timeout=15)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-    # find the first form (prefer one with 'login' in action)
-    form = None
-    forms = soup.find_all("form")
-    for f in forms:
-        action = (f.get("action") or "").lower()
-        if "login" in action:
-            form = f
-            break
-    if form is None and forms:
-        form = forms[0]
-    if form is None:
-        return {"post_url": LOGIN_PAGE, "hidden": {}}
-    action = form.get("action") or ""
-    post_url = action if action.startswith("http") else urljoin(LOGIN_PAGE, action)
-    # collect hidden inputs and defaults
+def parse_forms(html, base_url):
+    soup = BeautifulSoup(html, "html.parser")
+    forms = []
+    for f in soup.find_all("form"):
+        action = f.get("action") or ""
+        post_url = action if action.startswith("http") else urljoin(base_url, action)
+        method = (f.get("method") or "get").lower()
+        inputs = []
+        for inp in f.find_all("input"):
+            name = inp.get("name")
+            if not name:
+                continue
+            inputs.append({
+                "name": name,
+                "type": (inp.get("type") or "text").lower(),
+                "id": inp.get("id"),
+                "value": inp.get("value", "")
+            })
+        forms.append({"post_url": post_url, "method": method, "inputs": inputs, "form_tag": str(f)[:200]})
+    return forms
+
+def pretty_print_form(f, index):
+    print(f"\n=== Form #{index+1} ===")
+    print("POST URL:", f["post_url"])
+    print("METHOD:", f["method"].upper())
+    print("Inputs found:")
+    for inp in f["inputs"]:
+        print(f"  - name='{inp['name']}', type='{inp['type']}', id='{inp['id']}', default='{inp['value']}'")
+
+def find_field_names(inputs):
+    uname = None
+    pwd = None
     hidden = {}
-    for inp in form.find_all("input"):
-        name = inp.get("name")
-        if not name:
-            continue
-        typ = (inp.get("type") or "").lower()
-        if typ in ("hidden", "submit"):
-            hidden[name] = inp.get("value", "")
-    return {"post_url": post_url, "hidden": hidden, "form": form}
+    for inp in inputs:
+        n = inp["name"].lower()
+        t = inp["type"]
+        if t == "hidden":
+            hidden[inp["name"]] = inp["value"]
+        if not uname and n in COMMON_USERNAMES:
+            uname = inp["name"]
+        if not pwd and n in COMMON_PASSWORDS:
+            pwd = inp["name"]
+    return uname, pwd, hidden
 
-def attempt_login(username, password):
-    parsed = fetch_login_form()
-    post_url = parsed["post_url"]
-    payload = parsed.get("hidden", {}).copy()
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python inspect_and_login.py <login_page_url>")
+        sys.exit(1)
 
-    # Put the fields the page uses (you told me: name="username", name="password")
-    payload["username"] = username
-    payload["password"] = password
+    url = sys.argv[1].rstrip("/")
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENTS[0], "Accept": "text/html"})
+    print("[*] Fetching login page:", url)
+    r = session.get(url, timeout=20)
+    r.raise_for_status()
+    forms = parse_forms(r.text, url)
 
-    # include Referer header (some apps require it)
-    headers = {"Referer": LOGIN_PAGE}
+    if not forms:
+        print("[!] No <form> elements found on the page. Here's a short snippet:")
+        print(r.text[:2000])
+        sys.exit(1)
 
-    print("[i] Posting to:", post_url)
-    resp = session.post(post_url, data=payload, headers=headers, allow_redirects=True, timeout=20)
+    for i, f in enumerate(forms):
+        pretty_print_form(f, i)
 
-    print("[i] HTTP status:", resp.status_code)
-    print("[i] Final URL after redirects:", resp.url)
+    # Choose which form to use: prefer one with 'login' in action or first form
+    chosen = None
+    for f in forms:
+        if "login" in f["post_url"].lower() or "login" in f.get("form_tag","").lower():
+            chosen = f
+            break
+    if chosen is None:
+        chosen = forms[0]
 
-    # Heuristics to detect success:
-    if resp.url != LOGIN_PAGE and resp.status_code in (200, 302, 303):
-        print("✅ Login seems successful (redirected away from login page).")
-        return True, resp
+    print("\n[*] Using form with action:", chosen["post_url"])
+    uname_field, pwd_field, hidden = find_field_names(chosen["inputs"])
+    print("[*] Detected username field:", uname_field)
+    print("[*] Detected password field:", pwd_field)
+    if hidden:
+        print("[*] Hidden/default inputs discovered:", hidden)
 
-    body = resp.text.lower()
-    success_indicators = ["logout", "sign out", "dashboard", "welcome", "my account"]
-    if any(k in body for k in success_indicators):
-        print("✅ Login appears successful (found success keyword in HTML).")
-        return True, resp
+    # If only username present -> two-step flow likely. Handle both cases.
+    if uname_field and not pwd_field:
+        print("\n[>] Looks like a two-step flow: username is present but password is NOT in the same form.")
+        username = input("Enter username: ")
+        payload = hidden.copy()
+        payload[uname_field] = username
+        headers = {"Referer": url}
+        print("[*] Submitting username to:", chosen["post_url"])
+        resp = session.post(chosen["post_url"], data=payload, headers=headers, allow_redirects=True, timeout=20)
+        print("[*] HTTP status after username submit:", resp.status_code)
+        print("[*] Final URL:", resp.url)
+        # Parse the returned page to find next form (likely containing password now)
+        forms2 = parse_forms(resp.text, resp.url)
+        if not forms2:
+            print("[!] No form found after username submit. Here's a snippet of the response HTML:")
+            print(resp.text[:2000])
+            sys.exit(1)
+        # Show forms and prompt for password if found
+        for i, f2 in enumerate(forms2):
+            pretty_print_form(f2, i)
+        # Attempt to find password field now
+        f2 = forms2[0]  # try first
+        uname2, pwd2, hidden2 = find_field_names(f2["inputs"])
+        print("[*] On second page - detected password field:", pwd2)
+        password = getpass("Password: ")
+        # Build payload for second step
+        payload2 = hidden2.copy()
+        # include password and maybe username if needed by second form
+        if pwd2:
+            payload2[pwd2] = password
+        else:
+            # fallback: try common names
+            payload2["password"] = password
+        # include username if second form expects it
+        if uname2:
+            payload2[uname2] = username
+        headers = {"Referer": resp.url}
+        print("[*] Submitting password to:", f2["post_url"])
+        resp2 = session.post(f2["post_url"], data=payload2, headers=headers, allow_redirects=True, timeout=20)
+        print("[*] Final HTTP status:", resp2.status_code)
+        print("[*] Final URL after redirects:", resp2.url)
+        body = resp2.text.lower()
+        if resp2.url != url and any(k in body for k in ("logout","sign out","dashboard","welcome","my account")):
+            print("✅ Login appears successful. Final URL:", resp2.url)
+        else:
+            print("❌ Login may have failed. Response snippet:")
+            print(resp2.text[:2000])
+        return
 
-    # otherwise failed — print helpful snippet
-    print("❌ Login likely failed — server returned the login page or an error message.")
-    snippet = resp.text[:2000]
-    print("\n--- HTML snippet (first 2000 chars) ---\n")
-    print(snippet)
-    print("\n--- end snippet ---\n")
-    return False, resp
+    # Case: both username and password in same form (single step)
+    if uname_field and pwd_field:
+        username = input("Username: ")
+        password = getpass("Password: ")
+        payload = hidden.copy()
+        payload[uname_field] = username
+        payload[pwd_field] = password
+        headers = {"Referer": url}
+        print("[*] Submitting credentials to:", chosen["post_url"])
+        resp = session.post(chosen["post_url"], data=payload, headers=headers, allow_redirects=True, timeout=20)
+        print("[*] HTTP status:", resp.status_code)
+        print("[*] Final URL after redirects:", resp.url)
+        body = resp.text.lower()
+        if resp.url != url and any(k in body for k in ("logout","sign out","dashboard","welcome","my account")):
+            print("✅ Login appears successful. Final URL:", resp.url)
+        else:
+            print("❌ Login may have failed. Response snippet:")
+            print(resp.text[:2000])
+        return
+
+    # Fallback: no obvious username field - show form and exit
+    print("[!] Could not detect proper username/password fields automatically. Inspect the form printed above and re-run, or try Selenium if page is JS-dependent.")
+    sys.exit(2)
 
 if __name__ == "__main__":
-    user = input("Username: ")
-    pwd = getpass("Password: ")
-    ok, resp = attempt_login(user, pwd)
-    if ok:
-        print("\nFINAL URL:", resp.url)
-    else:
-        print("\nLogin failed. Check the HTML snippet above for the precise error message.")
-        print("If the page uses JavaScript to add tokens or submit, try the Selenium option.")
-        sys.exit(1)
+    main()
