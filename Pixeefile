@@ -1,31 +1,92 @@
 import requests
+from bs4 import BeautifulSoup
 from getpass import getpass
+import sys
+from urllib.parse import urljoin
 
-# URL of your login form
-LOGIN_URL = "https://crmapp.abx.com/crmyu/jsp/login.jsp"
+LOGIN_PAGE = "https://crmapp.abx.com/crmyu/jsp/login.jsp"
 
-# Prompt for credentials
-username = input("Enter username: ")
-password = getpass("Enter password: ")
-
-# Create session to persist cookies
+# Use a session to keep cookies (JSESSIONID etc.)
 session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+})
 
-# Usually login.jsp expects form fields like "username" and "password"
-# (sometimes they are named differently: check HTML form source)
-payload = {
-    "username": username,
-    "password": password
-}
+def fetch_login_form():
+    r = session.get(LOGIN_PAGE, timeout=15)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    # find the first form (prefer one with 'login' in action)
+    form = None
+    forms = soup.find_all("form")
+    for f in forms:
+        action = (f.get("action") or "").lower()
+        if "login" in action:
+            form = f
+            break
+    if form is None and forms:
+        form = forms[0]
+    if form is None:
+        return {"post_url": LOGIN_PAGE, "hidden": {}}
+    action = form.get("action") or ""
+    post_url = action if action.startswith("http") else urljoin(LOGIN_PAGE, action)
+    # collect hidden inputs and defaults
+    hidden = {}
+    for inp in form.find_all("input"):
+        name = inp.get("name")
+        if not name:
+            continue
+        typ = (inp.get("type") or "").lower()
+        if typ in ("hidden", "submit"):
+            hidden[name] = inp.get("value", "")
+    return {"post_url": post_url, "hidden": hidden, "form": form}
 
-# Perform login (POST)
-resp = session.post(LOGIN_URL, data=payload, allow_redirects=True)
+def attempt_login(username, password):
+    parsed = fetch_login_form()
+    post_url = parsed["post_url"]
+    payload = parsed.get("hidden", {}).copy()
 
-# Check if login worked
-if resp.url != LOGIN_URL and resp.status_code == 200:
-    print("✅ Login successful!")
-    print("➡️ Redirected to:", resp.url)
-else:
-    print("❌ Login failed or still on login page.")
-    print("Current URL:", resp.url)
-    print("Status Code:", resp.status_code)
+    # Put the fields the page uses (you told me: name="username", name="password")
+    payload["username"] = username
+    payload["password"] = password
+
+    # include Referer header (some apps require it)
+    headers = {"Referer": LOGIN_PAGE}
+
+    print("[i] Posting to:", post_url)
+    resp = session.post(post_url, data=payload, headers=headers, allow_redirects=True, timeout=20)
+
+    print("[i] HTTP status:", resp.status_code)
+    print("[i] Final URL after redirects:", resp.url)
+
+    # Heuristics to detect success:
+    if resp.url != LOGIN_PAGE and resp.status_code in (200, 302, 303):
+        print("✅ Login seems successful (redirected away from login page).")
+        return True, resp
+
+    body = resp.text.lower()
+    success_indicators = ["logout", "sign out", "dashboard", "welcome", "my account"]
+    if any(k in body for k in success_indicators):
+        print("✅ Login appears successful (found success keyword in HTML).")
+        return True, resp
+
+    # otherwise failed — print helpful snippet
+    print("❌ Login likely failed — server returned the login page or an error message.")
+    snippet = resp.text[:2000]
+    print("\n--- HTML snippet (first 2000 chars) ---\n")
+    print(snippet)
+    print("\n--- end snippet ---\n")
+    return False, resp
+
+if __name__ == "__main__":
+    user = input("Username: ")
+    pwd = getpass("Password: ")
+    ok, resp = attempt_login(user, pwd)
+    if ok:
+        print("\nFINAL URL:", resp.url)
+    else:
+        print("\nLogin failed. Check the HTML snippet above for the precise error message.")
+        print("If the page uses JavaScript to add tokens or submit, try the Selenium option.")
+        sys.exit(1)
