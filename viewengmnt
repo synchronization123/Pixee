@@ -280,6 +280,8 @@
     <script>
       const grouped = {{ grouped | tojson }};
       const statuses = {{ statuses | tojson }};
+      // product_map injected by server if available; default to empty object to keep template robust
+      const productsMap = {{ product_map | default({}) | tojson }};
 
       // Flatten into single array and normalize fields
       let engagements = [];
@@ -513,12 +515,12 @@
               // Build product display value (client-side safety to avoid showing numeric IDs)
               let productDisplay = "";
               try {
-                // use server-provided display if it's non-empty and not purely numeric
+                // use server-provided display if it's non-empty
                 if (e._display_product && String(e._display_product).trim() !== "") {
                   const dp = String(e._display_product).trim();
-                  // if dp looks like a number (id), try richer fields
+                  // if dp looks like a number (id), we'll try to lookup via productsMap or richer fields
                   if (/^\d+$/.test(dp)) {
-                    // try e.product (object), e.product_name, e.product_title, or fallback to dp
+                    // prefer server-side richer fields if present
                     if (e.product && typeof e.product === "object") {
                       productDisplay = e.product.name || e.product.title || dp;
                     } else if (e.product_name && String(e.product_name).trim() !== "") {
@@ -544,6 +546,23 @@
                     productDisplay = "";
                   }
                 }
+
+                // If we still have a numeric id or empty display, and server provided a productsMap, try to map by id
+                if ((productDisplay === "" || /^\d+$/.test(String(productDisplay))) && productsMap && typeof productsMap === "object" && Object.keys(productsMap).length > 0) {
+                  const possibleIds = [];
+                  if (e.product !== undefined && e.product !== null) possibleIds.push(e.product);
+                  if (e.product_id !== undefined && e.product_id !== null) possibleIds.push(e.product_id);
+                  // also consider server side `_display_product` if numeric
+                  if (/^\d+$/.test(String(e._display_product || ""))) possibleIds.push(Number(e._display_product));
+                  // coerce and lookup
+                  for (const pid of possibleIds) {
+                    if (pid === null || pid === undefined) continue;
+                    const key = String(pid);
+                    if (productsMap[key]) { productDisplay = productsMap[key]; break; }
+                    // some templates might have numeric keys as numbers converted to strings, above handles that
+                  }
+                }
+
               } catch (px) {
                 productDisplay = e._display_product || e.product_name || e.product_title || "";
               }
