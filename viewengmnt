@@ -510,7 +510,45 @@
                 }
               }
 
-              const actionBtn = `<button class="btn btn-sm btn-outline-primary action-btn" title="Edit"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg></button>`;
+              // Build product display value (client-side safety to avoid showing numeric IDs)
+              let productDisplay = "";
+              try {
+                // use server-provided display if it's non-empty and not purely numeric
+                if (e._display_product && String(e._display_product).trim() !== "") {
+                  const dp = String(e._display_product).trim();
+                  // if dp looks like a number (id), try richer fields
+                  if (/^\d+$/.test(dp)) {
+                    // try e.product (object), e.product_name, e.product_title, or fallback to dp
+                    if (e.product && typeof e.product === "object") {
+                      productDisplay = e.product.name || e.product.title || dp;
+                    } else if (e.product_name && String(e.product_name).trim() !== "") {
+                      productDisplay = e.product_name;
+                    } else if (e.product_title && String(e.product_title).trim() !== "") {
+                      productDisplay = e.product_title;
+                    } else {
+                      productDisplay = dp;
+                    }
+                  } else {
+                    // dp already looks like a human name/string
+                    productDisplay = dp;
+                  }
+                } else {
+                  // no _display_product, try fallbacks
+                  if (e.product && typeof e.product === "object") {
+                    productDisplay = e.product.name || e.product.title || "";
+                  } else if (e.product_name && String(e.product_name).trim() !== "") {
+                    productDisplay = e.product_name;
+                  } else if (e.product_title && String(e.product_title).trim() !== "") {
+                    productDisplay = e.product_title;
+                  } else {
+                    productDisplay = "";
+                  }
+                }
+              } catch (px) {
+                productDisplay = e._display_product || e.product_name || e.product_title || "";
+              }
+
+              const actionBtn = `<a href="/edit/${encodeURIComponent(e.id)}" class="btn btn-sm btn-outline-primary action-btn" title="Edit"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg></a>`;
 
               tr.innerHTML = `
                 <td style="text-align:center">${escapeHtml(e.id ?? "")}</td>
@@ -523,7 +561,7 @@
                 <td style="text-align:center">${escapeHtml(e._display_status)}</td>
                 <td style="text-align:center">${escapeHtml(e._display_build_id)}</td>
                 <td style="text-align:center">${escapeHtml(e._display_ir)}</td>
-                <td>${escapeHtml(e._display_product)}</td>
+                <td>${escapeHtml(productDisplay)}</td>
                 <td style="text-align:center">${actionBtn}</td>
               `;
               engBody.appendChild(tr);
