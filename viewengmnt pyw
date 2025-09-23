@@ -18,6 +18,7 @@ Enhancements:
     Status       -> Analysis Status
     Build ID     -> Review Status
 - Uses project-root-relative TOKEN_PATH so script works regardless of cwd.
+- Product column will now preferentially display the product NAME (not the id).
 """
 
 from flask import Flask, render_template
@@ -243,16 +244,33 @@ def index():
             # Analysis Status / Review Status
             it["_display_status"] = it.get("status_display") or it.get("status_name") or it.get("status") or ""
             it["_display_build_id"] = it.get("build_id") or it.get("build") or ""
-            # Product name
+            # Product name resolution (prefer name, not id)
             prod_val = it.get("product") or it.get("product_id") or None
             prod_name = ""
-            if isinstance(prod_val, dict):
-                prod_name = prod_val.get("name") or prod_val.get("title") or ""
-            elif isinstance(prod_val, int):
-                prod_name = product_map.get(prod_val) or str(prod_val)
-            else:
-                prod_name = it.get("product_name") or it.get("product_title") or ""
+            try:
+                # If product is a dict, pick name/title
+                if isinstance(prod_val, dict):
+                    prod_name = prod_val.get("name") or prod_val.get("title") or ""
+                elif isinstance(prod_val, int):
+                    # lookup from product_map
+                    prod_name = product_map.get(prod_val) or str(prod_val)
+                elif isinstance(prod_val, str):
+                    # if it's a numeric string, try to coerce and lookup
+                    pv = prod_val.strip()
+                    if pv.isdigit():
+                        pid = int(pv)
+                        prod_name = product_map.get(pid) or pv
+                    else:
+                        # Not numeric: it might already be a product name or a fallback property
+                        prod_name = it.get("product_name") or it.get("product_title") or pv
+                else:
+                    # final fallbacks
+                    prod_name = it.get("product_name") or it.get("product_title") or ""
+            except Exception:
+                # ensure no crash; fallback to available string fields
+                prod_name = it.get("product_name") or it.get("product_title") or str(prod_val or "")
             it["_display_product"] = prod_name
+
             # IR (version)
             it["_display_ir"] = it.get("version") or ""
 
