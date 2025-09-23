@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PCI Engagements — Table with All Filters in Row 1</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+      body { padding: 18px; background: #f7f9fb; }
+      .card { margin-bottom: 18px; }
+      .table-sm td, .table-sm th { padding: .45rem .6rem; vertical-align: middle; }
+      .table-wrap { overflow-x:auto; }
+      .pagination { margin-bottom: 0; }
+      .small-muted { font-size: .85rem; color: #6c757d; }
+      .card-body { padding: 0.75rem; }
+      .table-container { padding: 8px 12px; }
+
+      /* One-row filter layout - items wrap if viewport small */
+      .filters-row1 {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: flex-start;
+      }
+      .filter-item {
+        display: flex;
+        flex-direction: column;
+        margin-bottom: 6px;
+      }
+      .filter-item label { font-size: .85rem; margin-bottom: .2rem; }
+      .filter-item .form-control, .filter-item .form-select {
+        width: 5cm;
+        max-width: 100%;
+        height: calc(1.6rem + .6rem);
+        padding: .2rem .5rem;
+        font-size: .92rem;
+      }
+      .filter-card-title { font-weight:600; margin-bottom:.5rem; }
+      .very-small { font-size: .82rem; }
+
+      /* tests summary badges */
+      .tests-badge { font-size: 0.62rem; vertical-align: middle; margin-left: 6px; background: #f1f5f9; color: inherit; padding: .12rem .28rem; border-radius: .25rem; display: inline-block; }
+      .tests-badge small { font-size: 0.62rem; line-height:1; }
+
+      /* center align headers */
+      table thead th { text-align: center; }
+
+      /* action button */
+      .action-btn svg { width:1rem; height:1rem; vertical-align: middle; }
+
+      /* loading modal (DOM-driven) */
+      .modal-custom { display: none; position: fixed; z-index:1100; left:50%; top:50%; transform:translate(-50%,-50%); background:#fff; border-radius:.5rem; box-shadow:0 6px 18px rgba(0,0,0,0.12); padding:1rem 1.25rem; text-align:center; }
+      .modal-custom.show { display:block; }
+      .modal-backdrop-custom { position:fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.35); z-index:1090; }
+
+      .header-controls { display:flex; gap:8px; align-items:center; }
+      .header-controls .btn { padding: .35rem .5rem; font-size: .85rem; }
+
+      /* responsive fallback: full-width inputs on small screens */
+      @media (max-width: 768px) {
+        .filter-item .form-control, .filter-item .form-select { width: 100%; }
+        .filters-row1 { gap: 8px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container-fluid">
+
+      <!-- Header: title + menu (MCR / Patches / PCI / Plugin) -->
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h3 class="mb-0">PCI Engagements — Table</h3>
+
+        <!-- Bootstrap nav pills menu -->
+        <ul class="nav nav-pills">
+          <li class="nav-item"><a class="nav-link" href="#" id="menu-mcr">MCR</a></li>
+          <li class="nav-item"><a class="nav-link" href="#" id="menu-patches">Patches</a></li>
+          <li class="nav-item"><a class="nav-link active" href="#" id="menu-pci">PCI</a></li>
+          <li class="nav-item"><a class="nav-link" href="#" id="menu-plugin">Plugin</a></li>
+        </ul>
+      </div>
+
+      <!-- FILTER CARD (single row of filters; wraps on small screens) -->
+      <div class="row mb-3">
+        <div class="col-12">
+          <div class="card">
+            <div class="card-body">
+             <!-- <div class="filter-card-title">Filters (all in Row 1)</div>-->
+
+              <div class="filters-row1">
+                <div class="filter-item">
+                  <label>Name (search)</label>
+                  <input id="nameSearch" type="search" class="form-control form-control-sm" placeholder="Search name..." />
+                </div>
+
+                <div class="filter-item">
+                  <label>Assigned To</label>
+                  <select id="assignedToFilter" class="form-select form-select-sm">
+                    <option value="">(any)</option>
+                  </select>
+                </div>
+
+                <div class="filter-item">
+                  <label>Analysis Status</label>
+                  <select id="analysisStatusFilter" class="form-select form-select-sm">
+                    <option value="">(any)</option>
+                  </select>
+                </div>
+
+                <div class="filter-item">
+                  <label>Review Status</label>
+                  <select id="reviewStatusFilter" class="form-select form-select-sm">
+                    <option value="">(any)</option>
+                  </select>
+                </div>
+
+                <div class="filter-item">
+                  <label>Product</label>
+                  <select id="productFilter" class="form-select form-select-sm">
+                    <option value="">(any)</option>
+                  </select>
+                </div>
+
+                <div class="filter-item">
+                  <label>Created (From)</label>
+                  <input id="createdFrom" type="date" class="form-control form-control-sm" />
+                </div>
+
+                <div class="filter-item">
+                  <label>Created (To)</label>
+                  <input id="createdTo" type="date" class="form-control form-control-sm" />
+                </div>
+
+                <div class="filter-item">
+                  <label>Aging Min (days)</label>
+                  <input id="agingMin" type="number" min="0" class="form-control form-control-sm" placeholder="min" />
+                </div>
+
+                <div class="filter-item">
+                  <label>Aging Max (days)</label>
+                  <input id="agingMax" type="number" min="0" class="form-control form-control-sm" placeholder="max" />
+                </div>
+
+                <div class="filter-item">
+                  <label>AppSec ETA Start</label>
+                  <input id="appsecStart" type="date" class="form-control form-control-sm" />
+                </div>
+
+                <div class="filter-item">
+                  <label>AppSec ETA End</label>
+                  <input id="appsecEnd" type="date" class="form-control form-control-sm" />
+                </div>
+
+                <div class="filter-item">
+                  <label>RM ETA Start</label>
+                  <input id="rmStart" type="date" class="form-control form-control-sm" />
+                </div>
+
+                <div class="filter-item">
+                  <label>RM ETA End</label>
+                  <input id="rmEnd" type="date" class="form-control form-control-sm" />
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TABLE CARD -->
+      <div class="row">
+        <div class="col-12">
+          <div class="card shadow-sm">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <div><strong></strong> <span class="text-muted"></span></div>
+
+              <!-- header controls: Go, Clear, Page size, Refresh -->
+              <div class="header-controls">
+                <button id="goBtn" class="btn btn-primary btn-sm" title="Apply filters">Go</button>
+                <button id="clearBtn" class="btn btn-outline-secondary btn-sm" title="Clear filters">Clear</button>
+
+                <label class="mb-0 small-muted">Rows / page</label>
+                <select id="pageSizeSelect" class="form-select form-select-sm" style="width:80px;">
+                  <option value="5">5</option>
+                  <option value="10" selected>10</option>
+                  <option value="25">25</option>
+                  <option value="50">50</option>
+                </select>
+
+                <button id="refreshBtn" class="btn btn-outline-secondary btn-sm">Refresh</button>
+              </div>
+            </div>
+
+            <div class="card-body">
+              <div class="table-container">
+                <div class="table-wrap">
+                  <table id="engTable" class="table table-bordered table-hover table-sm align-middle mb-0">
+                    <thead class="table-light">
+                      <tr>
+                        <th style="min-width:70px">ID</th>
+                        <th style="min-width:120px">Created</th>
+                        <th style="min-width:90px">Aging</th>
+                        <th style="min-width:320px">Name</th>
+                        <th style="min-width:160px">Assigned To</th>
+                        <th style="min-width:110px">AppSec ETA</th>
+                        <th style="min-width:110px">RM ETA</th>
+                        <th style="min-width:120px">Analysis Status</th>
+                        <th style="min-width:120px">Review Status</th>
+                        <th style="min-width:100px">IR</th>
+                        <th style="min-width:160px">Product</th>
+                        <th style="min-width:80px">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="engBody">
+                      <!-- populated by JS -->
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class="d-flex justify-content-between align-items-center mt-2">
+                  <div class="small-muted" id="tableInfo">Showing 0 of 0</div>
+                  <nav aria-label="Table pagination">
+                    <ul id="pager" class="pagination pagination-sm mb-0"></ul>
+                  </nav>
+                </div>
+              </div>
+            </div>
+
+            <div class="card-footer text-muted small">
+              Data fetched from DefectDojo demo instance.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Loading modal (DOM-driven) -->
+    <div id="loadingModal" class="modal-custom" role="dialog" aria-hidden="true" aria-label="Loading data">
+      <div style="display:flex; align-items:center; gap:10px; justify-content:center;">
+        <div class="spinner-border" role="status" aria-hidden="true"></div>
+        <div>Loading data…</div>
+      </div>
+    </div>
+
+    <script>
+      // Loading modal helper (DOM-driven)
+      const _loading = {
+        backdropEl: null,
+        shown: false,
+        show() {
+          if (this.shown) return;
+          const modal = document.getElementById("loadingModal");
+          if (!modal) return;
+          this.backdropEl = document.createElement("div");
+          this.backdropEl.className = "modal-backdrop-custom";
+          document.body.appendChild(this.backdropEl);
+          modal.classList.add("show");
+          modal.setAttribute("aria-hidden", "false");
+          this.shown = true;
+        },
+        hide() {
+          if (!this.shown) return;
+          const modal = document.getElementById("loadingModal");
+          if (modal) {
+            modal.classList.remove("show");
+            modal.setAttribute("aria-hidden", "true");
+          }
+          if (this.backdropEl) {
+            try { document.body.removeChild(this.backdropEl); } catch(e){}
+            this.backdropEl = null;
+          }
+          this.shown = false;
+        }
+      };
+
+      // show right away while page boots
+      _loading.show();
+    </script>
+
+    <!-- Server data (provided by Flask) -->
+    <script>
+      const grouped = {{ grouped | tojson }};
+      const statuses = {{ statuses | tojson }};
+
+      // Flatten into single array and normalize fields
+      let engagements = [];
+      (function flatten() {
+        engagements = [];
+        for (const s of statuses) {
+          const arr = grouped[s] || [];
+          for (const e of arr) {
+            engagements.push(Object.assign({}, e, {
+              _display_created: e._display_created || (e.created || e.created_at || "").slice(0,10),
+              _display_aging: (e._display_aging === null || e._display_aging === undefined) ? "" : e._display_aging,
+              _display_name: e._display_name || e.name || (`Eng-${e.id||'?'}`),
+              _display_lead: e._display_lead || e.lead || "",
+              _display_target_start: e._display_target_start || (e.target_start || e.start || "").slice(0,10),
+              _display_target_end: e._display_target_end || (e.target_end || e.end || "").slice(0,10),
+              _display_status: e._display_status || e.status_display || e.status || "",
+              _display_build_id: e._display_build_id || e.build_id || e.build || "",
+              _display_product: e._display_product || e.product_name || "",
+              _display_ir: e._display_ir || e.version || "",
+              _display_tests_summary: e._display_tests_summary || []
+            }));
+          }
+        }
+      })();
+    </script>
+
+    <script>
+      // UI references
+      const engBody = document.getElementById("engBody");
+      const pager = document.getElementById("pager");
+      const tableInfo = document.getElementById("tableInfo");
+      const pageSizeSelect = document.getElementById("pageSizeSelect");
+      const refreshBtn = document.getElementById("refreshBtn");
+
+      // Filter inputs
+      const nameSearch = document.getElementById("nameSearch");
+      const assignedToFilter = document.getElementById("assignedToFilter");
+      const analysisStatusFilter = document.getElementById("analysisStatusFilter");
+      const reviewStatusFilter = document.getElementById("reviewStatusFilter");
+      const productFilter = document.getElementById("productFilter");
+
+      const createdFrom = document.getElementById("createdFrom");
+      const createdTo = document.getElementById("createdTo");
+      const agingMin = document.getElementById("agingMin");
+      const agingMax = document.getElementById("agingMax");
+
+      const appsecStart = document.getElementById("appsecStart");
+      const appsecEnd = document.getElementById("appsecEnd");
+      const rmStart = document.getElementById("rmStart");
+      const rmEnd = document.getElementById("rmEnd");
+
+      const goBtn = document.getElementById("goBtn");
+      const clearBtn = document.getElementById("clearBtn");
+
+      // Pagination state
+      let currentPage = 1;
+      let pageSize = parseInt(pageSizeSelect.value, 10) || 10;
+
+      // Working dataset
+      let filteredEngagements = engagements.slice();
+
+      // Populate dropdowns from data
+      function populateDropdowns() {
+        const assignedSet = new Set();
+        const analysisSet = new Set();
+        const reviewSet = new Set();
+        const productSet = new Set();
+
+        for (const e of engagements) {
+          if (e._display_lead) assignedSet.add(e._display_lead);
+          if (e._display_status) analysisSet.add(e._display_status);
+          if (e._display_build_id) reviewSet.add(e._display_build_id);
+          if (e._display_product) productSet.add(e._display_product);
+        }
+
+        function fill(selectEl, items) {
+          selectEl.innerHTML = '<option value="">(any)</option>';
+          const sorted = Array.from(items).filter(x => x !== "" && x !== null && x !== undefined).sort();
+          for (const v of sorted) {
+            const opt = document.createElement("option");
+            opt.value = v;
+            opt.textContent = v;
+            selectEl.appendChild(opt);
+          }
+        }
+
+        fill(assignedToFilter, assignedSet);
+        fill(analysisStatusFilter, analysisSet);
+        fill(reviewStatusFilter, reviewSet);
+        fill(productFilter, productSet);
+      }
+
+      // Apply filters and render
+      function applyFilters() {
+        const nameQ = (nameSearch.value || "").trim().toLowerCase();
+        const leadVal = assignedToFilter.value || "";
+        const analysisVal = analysisStatusFilter.value || "";
+        const reviewVal = reviewStatusFilter.value || "";
+        const productVal = productFilter.value || "";
+
+        const cFrom = createdFrom.value || null;
+        const cTo = createdTo.value || null;
+        const aMin = agingMin.value ? parseInt(agingMin.value, 10) : null;
+        const aMax = agingMax.value ? parseInt(agingMax.value, 10) : null;
+
+        const appStart = appsecStart.value || null;
+        const appEnd = appsecEnd.value || null;
+        const rStart = rmStart.value || null;
+        const rEnd = rmEnd.value || null;
+
+        filteredEngagements = engagements.filter(e => {
+          // Name
+          if (nameQ) {
+            const nm = (e._display_name || "").toString().toLowerCase();
+            if (!nm.includes(nameQ)) return false;
+          }
+          // Assigned To
+          if (leadVal) {
+            const lead = (e._display_lead || "").toString();
+            if (lead !== leadVal) return false;
+          }
+          // Analysis
+          if (analysisVal) {
+            const st = (e._display_status || "").toString();
+            if (st !== analysisVal) return false;
+          }
+          // Review
+          if (reviewVal) {
+            const rv = (e._display_build_id || "").toString();
+            if (rv !== reviewVal) return false;
+          }
+          // Product
+          if (productVal) {
+            const p = (e._display_product || "").toString();
+            if (p !== productVal) return false;
+          }
+
+          // Created range
+          if (cFrom) {
+            if (!e._display_created || e._display_created < cFrom) return false;
+          }
+          if (cTo) {
+            if (!e._display_created || e._display_created > cTo) return false;
+          }
+
+          // Aging range
+          if (aMin !== null && aMin !== undefined && aMin !== "") {
+            const age = (e._display_aging === "" || e._display_aging === null || e._display_aging === undefined) ? null : Number(e._display_aging);
+            if (age === null || isNaN(age) || age < aMin) return false;
+          }
+          if (aMax !== null && aMax !== undefined && aMax !== "") {
+            const age = (e._display_aging === "" || e._display_aging === null || e._display_aging === undefined) ? null : Number(e._display_aging);
+            if (age === null || isNaN(age) || age > aMax) return false;
+          }
+
+          // AppSec ETA
+          if (appStart) {
+            if (!e._display_target_start || e._display_target_start < appStart) return false;
+          }
+          if (appEnd) {
+            if (!e._display_target_start || e._display_target_start > appEnd) return false;
+          }
+          // RM ETA
+          if (rStart) {
+            if (!e._display_target_end || e._display_target_end < rStart) return false;
+          }
+          if (rEnd) {
+            if (!e._display_target_end || e._display_target_end > rEnd) return false;
+          }
+
+          return true;
+        });
+
+        currentPage = 1;
+        renderTable();
+      }
+
+      // Clear filters
+      function clearFilters() {
+        nameSearch.value = "";
+        assignedToFilter.value = "";
+        analysisStatusFilter.value = "";
+        reviewStatusFilter.value = "";
+        productFilter.value = "";
+
+        createdFrom.value = "";
+        createdTo.value = "";
+        agingMin.value = "";
+        agingMax.value = "";
+
+        appsecStart.value = "";
+        appsecEnd.value = "";
+        rmStart.value = "";
+        rmEnd.value = "";
+
+        filteredEngagements = engagements.slice();
+        currentPage = 1;
+        renderTable();
+      }
+
+      // Render table
+      function renderTable() {
+        try {
+          const total = filteredEngagements.length;
+          const totalPages = Math.max(1, Math.ceil(total / pageSize));
+          if (currentPage > totalPages) currentPage = totalPages;
+          const start = (currentPage - 1) * pageSize;
+          const end = Math.min(total, start + pageSize);
+          const slice = filteredEngagements.slice(start, end);
+
+          engBody.innerHTML = "";
+          if (slice.length === 0) {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `<td colspan="12" class="text-center text-muted">No engagements to display.</td>`;
+            engBody.appendChild(tr);
+          } else {
+            for (const e of slice) {
+              const tr = document.createElement("tr");
+
+              // tests summary badges
+              let testsHtml = "";
+              if (Array.isArray(e._display_tests_summary) && e._display_tests_summary.length > 0) {
+                for (const s of e._display_tests_summary) {
+                  const safeTag = escapeHtml(s.tag);
+                  const safeCnt = escapeHtml(s.count ?? 0);
+                  const color = (s.color === "orange") ? "orange" : "green";
+                  testsHtml += `<span class="tests-badge"><small style="color:${color}">${safeCnt}(${safeTag})</small></span>`;
+                }
+              }
+
+              const actionBtn = `<button class="btn btn-sm btn-outline-primary action-btn" title="Edit"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg></button>`;
+
+              tr.innerHTML = `
+                <td style="text-align:center">${escapeHtml(e.id ?? "")}</td>
+                <td style="text-align:center">${escapeHtml(e._display_created)}</td>
+                <td style="text-align:center">${escapeHtml(e._display_aging === "" ? "" : e._display_aging)}</td>
+                <td><strong>${escapeHtml(e._display_name)}</strong> ${testsHtml}</td>
+                <td>${escapeHtml(e._display_lead)}</td>
+                <td style="text-align:center">${escapeHtml(e._display_target_start)}</td>
+                <td style="text-align:center">${escapeHtml(e._display_target_end)}</td>
+                <td style="text-align:center">${escapeHtml(e._display_status)}</td>
+                <td style="text-align:center">${escapeHtml(e._display_build_id)}</td>
+                <td style="text-align:center">${escapeHtml(e._display_ir)}</td>
+                <td>${escapeHtml(e._display_product)}</td>
+                <td style="text-align:center">${actionBtn}</td>
+              `;
+              engBody.appendChild(tr);
+            }
+          }
+
+          renderPager(totalPages);
+          tableInfo.textContent = total === 0 ? `Showing 0 of 0` : `Showing ${start + 1}-${end} of ${total}`;
+        } catch (err) {
+          engBody.innerHTML = `<tr><td colspan="12" class="text-danger">Error rendering table: ${escapeHtml(String(err))}</td></tr>`;
+        } finally {
+          try { _loading.hide(); } catch (e) {}
+        }
+      }
+
+      // Pagination
+      function renderPager(totalPages) {
+        pager.innerHTML = "";
+        const prevLi = document.createElement("li");
+        prevLi.className = "page-item" + (currentPage === 1 ? " disabled" : "");
+        prevLi.innerHTML = `<a class="page-link" href="#" aria-label="Previous">&laquo;</a>`;
+        prevLi.addEventListener("click", (ev) => { ev.preventDefault(); if (currentPage>1) { currentPage--; renderTable(); }});
+        pager.appendChild(prevLi);
+
+        const maxButtons = 7;
+        let startPage = Math.max(1, currentPage - Math.floor(maxButtons/2));
+        let endPage = startPage + maxButtons - 1;
+        if (endPage > totalPages) { endPage = totalPages; startPage = Math.max(1, endPage - maxButtons + 1); }
+
+        for (let p = startPage; p <= endPage; p++) {
+          const li = document.createElement("li");
+          li.className = "page-item" + (p === currentPage ? " active" : "");
+          li.innerHTML = `<a class="page-link" href="#">${p}</a>`;
+          li.addEventListener("click", (ev) => { ev.preventDefault(); currentPage = p; renderTable(); });
+          pager.appendChild(li);
+        }
+
+        const nextLi = document.createElement("li");
+        nextLi.className = "page-item" + (currentPage === totalPages ? " disabled" : "");
+        nextLi.innerHTML = `<a class="page-link" href="#" aria-label="Next">&raquo;</a>`;
+        nextLi.addEventListener("click", (ev) => { ev.preventDefault(); if (currentPage<totalPages) { currentPage++; renderTable(); }});
+        pager.appendChild(nextLi);
+      }
+
+      // utils
+      function escapeHtml(s) {
+        if (s === null || s === undefined) return "";
+        return String(s)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      // init
+      document.addEventListener("DOMContentLoaded", function () {
+        try { populateDropdowns(); } catch (e) {}
+        filteredEngagements = engagements.slice();
+        pageSize = parseInt(pageSizeSelect.value, 10) || 10;
+        // allow modal to paint then render
+        setTimeout(() => { renderTable(); }, 10);
+      });
+
+      // wire controls
+      goBtn.addEventListener("click", () => {
+        _loading.show();
+        setTimeout(() => applyFilters(), 10);
+      });
+      clearBtn.addEventListener("click", () => {
+        _loading.show();
+        setTimeout(() => { clearFilters(); _loading.hide(); }, 10);
+      });
+
+      pageSizeSelect.addEventListener("change", () => {
+        pageSize = parseInt(pageSizeSelect.value, 10) || 10;
+        currentPage = 1;
+        renderTable();
+      });
+
+      refreshBtn.addEventListener("click", () => {
+        _loading.show();
+        setTimeout(() => location.reload(), 80);
+      });
+
+      window.addEventListener("load", () => { try{ _loading.hide(); } catch(e){} });
+
+      // Menu click wiring (optional - currently placeholders)
+      document.getElementById('menu-mcr').addEventListener('click', function(e){
+        e.preventDefault();
+        // TODO: navigate to MCR view (implement server route or client behavior)
+        alert('MCR selected (implement navigation)');
+      });
+      document.getElementById('menu-patches').addEventListener('click', function(e){
+        e.preventDefault();
+        alert('Patches selected (implement navigation)');
+      });
+      document.getElementById('menu-pci').addEventListener('click', function(e){
+        e.preventDefault();
+        // already active - optionally refresh
+      });
+      document.getElementById('menu-plugin').addEventListener('click', function(e){
+        e.preventDefault();
+        alert('Plugin selected (implement navigation)');
+      });
+
+      // populateDropdowns function defined above for clarity (kept)
+    </script>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>
