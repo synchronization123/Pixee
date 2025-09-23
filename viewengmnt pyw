@@ -1,0 +1,274 @@
+#!/usr/bin/env python
+# coding: utf-8
+"""
+viewengagement.pyw
+Flask app that shows DefectDojo engagements with tag 'pci'
+All engagements shown in a single card/table with client-side pagination.
+
+Enhancements:
+- Resolves user names from Users API (first_name + last_name) for Assigned To column.
+- Resolves product name from Products API for Product column.
+- Adds IR column using engagement 'version' field.
+- Adds tests summary per engagement (counts grouped by branch_tag) using Tests API (/api/v2/tests/?engagement={id}).
+  - branch_tag == "Pending" or "On Hold" => orange text
+  - otherwise => green text
+- Column header renames:
+    Target Start -> AppSec ETA
+    Target End   -> RM ETA
+    Status       -> Analysis Status
+    Build ID     -> Review Status
+- Uses project-root-relative TOKEN_PATH so script works regardless of cwd.
+"""
+
+from flask import Flask, render_template
+import requests
+import json
+import os
+from collections import Counter, OrderedDict
+
+BASE_URL = "https://demo.defectdojo.org"
+ENG_API = "/api/v2/engagements/"
+USERS_API = "/api/v2/users/"
+PRODUCTS_API = "/api/v2/products/"
+TESTS_API = "/api/v2/tests/"
+
+# Resolve project root relative to this script's parent directory
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TOKEN_PATH = os.path.join(BASE_DIR, "Support", "token.json")
+
+ALLOWED_STATUSES = ["Not Started", "In Progress", "On Hold"]
+PAGE_SIZE = 200
+REQUEST_TIMEOUT = 15
+
+app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
+
+
+def load_token(path=TOKEN_PATH):
+    support_dir = os.path.dirname(path)
+    if not os.path.isdir(support_dir):
+        raise FileNotFoundError(
+            f"Support folder not found at expected path: {support_dir}\n"
+            "➡ Please create a folder named 'Support' in your project root "
+            "and place 'token.json' inside it."
+        )
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"token.json file not found at: {path}\n"
+            "➡ Please create 'Support/token.json' with your API token."
+        )
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read().strip()
+    try:
+        j = json.loads(text)
+        if isinstance(j, dict):
+            for key in ("token", "api_token", "apiKey", "api_key"):
+                if key in j:
+                    return j[key]
+            values = [v for v in j.values() if isinstance(v, str)]
+            if len(values) == 1:
+                return values[0]
+    except Exception:
+        pass
+    if text:
+        return text
+    raise ValueError(
+        "Could not parse token from Support/token.json. Expected format: {\"token\": \"your_api_token_here\"} or just the raw token string."
+    )
+
+
+def _paged_fetch(url, headers, params=None):
+    """Generic paginator for DRF-style paginated endpoints or list responses."""
+    items = []
+    params_sent = params or {}
+    while url:
+        r = requests.get(url, headers=headers, params=params_sent, timeout=REQUEST_TIMEOUT)
+        params_sent = {}
+        if r.status_code != 200:
+            raise RuntimeError(f"API returned {r.status_code} for {url}: {r.text}")
+        data = r.json()
+        if isinstance(data, dict):
+            page_items = data.get("results") or data.get("objects") or []
+            items.extend(page_items)
+            next_url = data.get("next")
+            if not next_url:
+                break
+            url = next_url
+        elif isinstance(data, list):
+            items.extend(data)
+            break
+        else:
+            break
+    return items
+
+
+def fetch_engagements(token):
+    headers = {"Authorization": f"Token {token}"}
+    url = BASE_URL.rstrip("/") + ENG_API
+    params = {"tags": "pci", "limit": PAGE_SIZE}
+    return _paged_fetch(url, headers, params=params)
+
+
+def fetch_users_map(token):
+    headers = {"Authorization": f"Token {token}"}
+    url = BASE_URL.rstrip("/") + USERS_API
+    users = _paged_fetch(url, headers, params={"limit": PAGE_SIZE})
+    m = {}
+    for u in users:
+        uid = u.get("id")
+        fname = (u.get("first_name") or "").strip()
+        lname = (u.get("last_name") or "").strip()
+        if fname or lname:
+            name = (fname + " " + lname).strip()
+        else:
+            name = u.get("username") or u.get("email") or f"user-{uid}"
+        m[uid] = name
+    return m
+
+
+def fetch_products_map(token):
+    headers = {"Authorization": f"Token {token}"}
+    url = BASE_URL.rstrip("/") + PRODUCTS_API
+    prods = _paged_fetch(url, headers, params={"limit": PAGE_SIZE})
+    m = {}
+    for p in prods:
+        pid = p.get("id")
+        name = p.get("name") or p.get("title") or f"product-{pid}"
+        m[pid] = name
+    return m
+
+
+def fetch_tests_for_engagement(token, engagement_id):
+    """
+    Return list of tests for a given engagement_id via pagination:
+      GET /api/v2/tests/?engagement={id}&limit=PAGE_SIZE
+    """
+    headers = {"Authorization": f"Token {token}"}
+    url = BASE_URL.rstrip("/") + TESTS_API
+    params = {"engagement": engagement_id, "limit": PAGE_SIZE}
+    return _paged_fetch(url, headers, params=params)
+
+
+def tests_summary_from_tests(tests):
+    """
+    Given a list of test dicts, produce a list of summary dicts:
+      [{'tag': 'Pending', 'count': 2, 'color': 'orange'}, ...]
+    Order: descending count, then alphabetic tag.
+    """
+    # Normalize tag retrieval
+    tags = []
+    for t in tests:
+        tag = t.get("branch_tag") or t.get("branchTag") or t.get("branch") or "Unknown"
+        # Normalize string
+        if tag is None:
+            tag = "Unknown"
+        tag = str(tag).strip()
+        if tag == "":
+            tag = "Unknown"
+        tags.append(tag)
+
+    counts = Counter(tags)
+    # Build ordered list sorted by descending count then tag name
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    summary = []
+    for tag, cnt in ordered:
+        # color rule:
+        color = "orange" if tag in ("Pending", "On Hold") else "green"
+        summary.append({"tag": tag, "count": cnt, "color": color})
+    return summary
+
+
+def filter_and_group(engs, allowed_statuses=ALLOWED_STATUSES):
+    grouped = {s: [] for s in allowed_statuses}
+    for e in engs:
+        status = e.get("status") or e.get("engagement_status") or ""
+        if isinstance(status, int):
+            status = str(status)
+        human = e.get("status_display") or e.get("status_name") or status
+        if human in allowed_statuses:
+            grouped[human].append(e)
+    for k in grouped:
+        grouped[k].sort(key=lambda x: x.get("target_start") or x.get("start") or "", reverse=True)
+    return grouped
+
+
+@app.route("/")
+def index():
+    # load token
+    try:
+        token = load_token()
+    except Exception as e:
+        return f"<h3 style='color:red'>Error loading token:</h3><pre>{e}</pre>", 500
+
+    # fetch engagements
+    try:
+        engs = fetch_engagements(token)
+    except Exception as e:
+        return f"<h3 style='color:red'>Error fetching engagements:</h3><pre>{e}</pre>", 502
+
+    # fetch lookups (best-effort; fallbacks applied)
+    try:
+        user_map = fetch_users_map(token)
+    except Exception:
+        user_map = {}
+
+    try:
+        product_map = fetch_products_map(token)
+    except Exception:
+        product_map = {}
+
+    grouped = filter_and_group(engs)
+
+    # annotate each engagement with display fields for the frontend (including tests summary)
+    for status, items in grouped.items():
+        for it in items:
+            # Name
+            it["_display_name"] = it.get("name") or it.get("product_name") or f"Eng-{it.get('id','?')}"
+            # Created
+            created = it.get("created") or it.get("created_at") or ""
+            it["_display_created"] = str(created)[:10]
+            # Assigned To (lead)
+            lead_val = it.get("lead") or it.get("lead_id") or it.get("manager") or it.get("owner")
+            lead_name = ""
+            if isinstance(lead_val, dict):
+                lead_name = ((lead_val.get("first_name") or "") + " " + (lead_val.get("last_name") or "")).strip() or lead_val.get("username") or lead_val.get("email") or str(lead_val.get("id", ""))
+            elif isinstance(lead_val, int):
+                lead_name = user_map.get(lead_val) or str(lead_val)
+            elif isinstance(lead_val, str):
+                lead_name = lead_val
+            it["_display_lead"] = lead_name
+
+            # AppSec ETA / RM ETA
+            it["_display_target_start"] = (it.get("target_start") or it.get("start") or "")[:10]
+            it["_display_target_end"] = (it.get("target_end") or it.get("end") or "")[:10]
+            # Analysis Status / Review Status
+            it["_display_status"] = it.get("status_display") or it.get("status_name") or it.get("status") or ""
+            it["_display_build_id"] = it.get("build_id") or it.get("build") or ""
+            # Product name
+            prod_val = it.get("product") or it.get("product_id") or None
+            prod_name = ""
+            if isinstance(prod_val, dict):
+                prod_name = prod_val.get("name") or prod_val.get("title") or ""
+            elif isinstance(prod_val, int):
+                prod_name = product_map.get(prod_val) or str(prod_val)
+            else:
+                prod_name = it.get("product_name") or it.get("product_title") or ""
+            it["_display_product"] = prod_name
+            # IR (version)
+            it["_display_ir"] = it.get("version") or ""
+
+            # Tests summary: best-effort; on error -> empty list
+            try:
+                eng_id = it.get("id")
+                if eng_id is not None:
+                    tests = fetch_tests_for_engagement(token, eng_id)
+                    it["_display_tests_summary"] = tests_summary_from_tests(tests)
+                else:
+                    it["_display_tests_summary"] = []
+            except Exception:
+                it["_display_tests_summary"] = []
+
+    return render_template("viewengagement.html", grouped=grouped, statuses=ALLOWED_STATUSES)
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000, debug=True)
