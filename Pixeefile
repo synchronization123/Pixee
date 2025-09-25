@@ -1,146 +1,200 @@
-import requests
-import pandas as pd
+# main.py
 import os
+import asyncio
+from typing import List, Dict, Any, Optional
 
-# API details
-API_URL = "https://dependencytrackapi.crm.com/api/v1/project"
-FINDINGS_API_URL = "https://dependencytrackapi.crm/api/v1/finding/project"
-API_TOKEN = "abccc"
+from fastapi import FastAPI, Request, Query
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
+import httpx
+from pydantic import BaseSettings
+
+# ---- Settings via environment variables ----
+class Settings(BaseSettings):
+    API_URL_BASE: str = "https://dependencytrackapi.crm.com"   # change to your DT base URL
+    API_TOKEN: str = "your_token_here"
+    PAGE_LIMIT: int = 100  # page size when listing projects from DT (internal)
+    # concurrency for concurrent findings requests
+    CONCURRENCY: int = 8
+
+    class Config:
+        env_file = ".env"
+
+settings = Settings()
+
+API_BASE = settings.API_URL_BASE.rstrip("/")
+PROJECTS_API = f"{API_BASE}/api/v1/project"
+FINDINGS_PROJECT_API = f"{API_BASE}/api/v1/finding/project"  # usage: /api/v1/finding/project/{project_uuid}
+ANALYSIS_API = f"{API_BASE}/api/v1/analysis"
+
 HEADERS = {
-    "X-Api-Key": API_TOKEN,
-    "Content-Type": "application/json",
-    "Accept": "application/json"
+    "X-Api-Key": settings.API_TOKEN,
+    "Accept": "application/json",
+    "Content-Type": "application/json"
 }
 
-def fetch_all_dependency_data():
-    """Fetch all pages of Dependency Track API data."""
-    all_data = []
-    page = 1
-    limit = 100  # Number of records per request
+app = FastAPI()
+templates = Jinja2Templates(directory="templates")
 
-    while True:
-        params = {"page": page, "limit": limit}  # Pagination parameters
-        try:
-            response = requests.get(API_URL, headers=HEADERS, params=params)
-            response.raise_for_status()
-            data = response.json()
+# serve static if needed (bootstrap included from CDN so not required, but keep static mount)
+if not os.path.exists("static"):
+    os.makedirs("static", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-            if not data:
-                break  # Stop if no more records
-            
-            all_data.extend(data)  # Append current batch to full list
 
-            print(f"Fetched {len(data)} records from page {page}")
-
-            # Stop if fewer than 'limit' records are returned (last page)
-            if len(data) < limit:
+# ---- Helper async functions to call DT ----
+async def fetch_all_projects_async() -> List[Dict[str, Any]]:
+    """Paginate through projects and return list. Uses offset/limit pagination."""
+    client_timeout = httpx.Timeout(60.0, read=120.0)
+    projects = []
+    offset = 0
+    limit = settings.PAGE_LIMIT
+    async with httpx.AsyncClient(timeout=client_timeout, headers=HEADERS) as client:
+        while True:
+            params = {"offset": offset, "limit": limit}
+            try:
+                r = await client.get(PROJECTS_API, params=params)
+                r.raise_for_status()
+                batch = r.json()
+            except Exception as e:
+                print("Error fetching projects:", e)
                 break
+            if not batch:
+                break
+            projects.extend(batch)
+            if len(batch) < limit:
+                break
+            offset += limit
+    return projects
 
-            page += 1  # Move to next page
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching data: {e}")
-            break
-
-    return all_data
-
-def fetch_findings_for_uuid(uuid, project_name):
-    """Fetch findings for a specific UUID."""
-    url = f"{FINDINGS_API_URL}/{uuid}"
+async def fetch_findings_for_project_async(project_uuid: str, client: httpx.AsyncClient) -> Optional[List[Dict[str, Any]]]:
+    """Return list of findings for project_uuid, or None on failure."""
+    url = f"{FINDINGS_PROJECT_API}/{project_uuid}"
     try:
-        response = requests.get(url, headers=HEADERS)
-        response.raise_for_status()
-        data = response.json()
-
-        # If no data found, create a blank Excel with headers
-        if not data:
-            print(f"No findings for UUID: {uuid}. Saving blank Excel.")
-            df = pd.DataFrame(columns=["Finding", "Severity", "Description", "analysis.state", "component.name"])  # Example headers
-            df.to_excel(f"data/{project_name}.xlsx", index=False)
-            print(f"Blank Excel file created for UUID: {uuid} with name {project_name}.xlsx")
-            return None
-        else:
-            # Convert findings data to a DataFrame and save to Excel
-            df = pd.json_normalize(data)
-            df.to_excel(f"data/{project_name}.xlsx", index=False)
-            print(f"Data successfully saved for UUID: {uuid} with name {project_name}.xlsx")
-
-            # Check if 'analysis.state' column exists, else add "Analysis Pending"
-            if 'analysis.state' not in df.columns:
-                df['analysis.state'] = 'Analysis Pending'
-                df.to_excel(f"data/{project_name}.xlsx", index=False)
-                print(f"Added 'Analysis Pending' to 'analysis.state' column for {project_name}.xlsx")
-            return df
-
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching findings for UUID {uuid}: {e}")
+        r = await client.get(url)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"Failed to fetch findings for project {project_uuid}: {e}")
         return None
 
-def generate_count_excel(final_data):
-    """Generate Count.xlsx with Filename, component.name, analysis.state."""
-    # Fill any missing 'analysis.state' with 'Analysis Pending'
-    final_df = pd.DataFrame(final_data)
-    final_df['analysis.state'].fillna('Analysis Pending', inplace=True)
-    final_df.to_excel("Count.xlsx", index=False)
-    print("Count.xlsx has been successfully created with filenames, component names, and analysis state.")
+def extract_analysis_state_from_finding(f: Dict[str, Any]) -> Optional[str]:
+    """Robustly retrieve analysis state from various possible shapes."""
+    # try nested analysis object
+    analysis = f.get("analysis")
+    if isinstance(analysis, dict):
+        for key in ("analysisState", "state", "analysis.state"):
+            v = analysis.get(key)
+            if v is not None:
+                return str(v)
+    # try flat fields
+    for key in ("analysisState", "analysis.state", "analysis"):
+        v = f.get(key)
+        if v is not None:
+            return str(v)
+    # if nothing present, treat as blank (None)
+    return None
 
-def generate_final_summary():
-    """Generate final.xlsx with Filename, Jar count, Js count."""
-    final_summary = []
+async def compute_counts_for_projects(projects: List[Dict[str, Any]], page: int, per_page: int) -> Dict[str, Any]:
+    """
+    For the provided projects list (already filtered for tag), compute blank & NOT_SET counts for each project.
+    This function applies pagination (server-side).
+    """
+    # apply pagination
+    total = len(projects)
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_projects = projects[start:end]
+    results = []
 
-    # Loop through each file in the 'data' folder
-    for file in os.listdir("data"):
-        if file.endswith(".xlsx"):
-            filename = file.replace(".xlsx", "")  # Remove .xlsx extension
-            project_df = pd.read_excel(f"data/{file}")
+    semaphore = asyncio.Semaphore(settings.CONCURRENCY)
+    client_timeout = httpx.Timeout(60.0, read=120.0)
+    async with httpx.AsyncClient(timeout=client_timeout, headers=HEADERS) as client:
 
-            # Count occurrences of 'jar' and 'js' in component.name
-            jar_count = project_df[project_df['component.name'].str.contains('jar', case=False, na=False)].shape[0]
-            js_count = project_df[project_df['component.name'].str.contains('js', case=False, na=False)].shape[0]
+        async def work_one(proj: Dict[str, Any]):
+            async with semaphore:
+                proj_uuid = proj.get("uuid")
+                name = proj.get("name") or proj.get("uniqueId") or proj_uuid
+                findings = await fetch_findings_for_project_async(proj_uuid, client)
+                blank_count = 0
+                not_set_count = 0
+                total_findings = 0
+                if isinstance(findings, list):
+                    total_findings = len(findings)
+                    for f in findings:
+                        state = extract_analysis_state_from_finding(f)
+                        # treat missing or empty string as blank
+                        if state is None or (isinstance(state, str) and state.strip() == ""):
+                            blank_count += 1
+                        elif state.strip().upper() == "NOT_SET":
+                            not_set_count += 1
+                return {
+                    "uuid": proj_uuid,
+                    "name": name,
+                    "blank_count": blank_count,
+                    "not_set_count": not_set_count,
+                    "total_findings": total_findings,
+                    # optional: include tags for display
+                    "tags": proj.get("tags", [])
+                }
 
-            # Clean up the filename (e.g., crm_jar → Crm)
-            clean_filename = filename.split('_')[0].capitalize()
+        tasks = [asyncio.create_task(work_one(p)) for p in page_projects]
+        completed = await asyncio.gather(*tasks)
+        results.extend(completed)
 
-            final_summary.append({
-                'Filename': clean_filename,
-                'Jar count': jar_count,
-                'Js count': js_count
-            })
+    return {
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "projects": results
+    }
 
-    # Convert summary to DataFrame and save to final.xlsx
-    summary_df = pd.DataFrame(final_summary)
-    summary_df.to_excel("final.xlsx", index=False)
-    print("final.xlsx has been successfully created with Jar and Js counts.")
 
-def main():
-    # Fetch all projects to get UUIDs
-    all_projects = fetch_all_dependency_data()
+# ---- Routes ----
 
-    # Filter projects where version is 'develop'
-    filtered_projects = [project for project in all_projects if project.get('version') == 'develop']
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    """Serve the Bootstrap front-end page."""
+    return templates.TemplateResponse("index.html", {"request": request})
 
-    print(f"Found {len(filtered_projects)} projects with version 'develop'.")
 
-    # Prepare list to store final data for Count.xlsx
-    final_data = []
+@app.get("/api/projects", response_class=JSONResponse)
+async def api_projects(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
+    tag: str = Query("daily monitoring")
+):
+    """
+    Return paginated projects that have the given tag (case-insensitive contains).
+    For each project on the requested page compute blank & NOT_SET counts by fetching findings.
+    """
+    # 1) fetch all projects
+    projects = await fetch_all_projects_async()
+    # 2) filter by tag: project may have 'tags' as list of strings or objects with 'name'
+    filtered = []
+    tag_lower = tag.strip().lower()
+    for p in projects:
+        tags = p.get("tags") or []
+        matched = False
+        # tags might be a list of strings or list of dicts
+        for t in tags:
+            if isinstance(t, dict):
+                name = t.get("name", "")
+            else:
+                name = str(t)
+            if tag_lower in name.lower():
+                matched = True
+                break
+        if matched:
+            filtered.append(p)
 
-    # For each filtered project, fetch findings using UUID
-    for project in filtered_projects:
-        uuid = project.get('uuid')
-        project_name = project.get('name')  # Get project name to use as filename
-        if uuid and project_name:
-            df = fetch_findings_for_uuid(uuid, project_name)
-            if df is not None:
-                # Extract component.name and analysis.state for each row and add to final data
-                for _, row in df.iterrows():
-                    component_name = row.get('component.name', 'N/A')
-                    analysis_state = row.get('analysis.state', 'Analysis Pending')
-                    final_data.append({"Filename": project_name, "component.name": component_name, "analysis.state": analysis_state})
+    # 3) compute counts for paginated projects
+    result = await compute_counts_for_projects(filtered, page=page, per_page=per_page)
+    return JSONResponse(result)
 
-    # Generate Count.xlsx with filenames, component names, and analysis state
-    generate_count_excel(final_data)
 
-    # Generate final.xlsx with Jar and Js counts
-    generate_final_summary()
-
-if __name__ == "__main__":
-    main()
+# ---- Simple health endpoint ----
+@app.get("/api/health")
+async def health():
+    return {"status": "ok"}
