@@ -115,16 +115,13 @@ def main():
     # Fetch all projects to get UUIDs
     all_projects = fetch_all_dependency_data()
 
-    # Filter projects where version is 'develop'
-    filtered_projects = [project for project in all_projects if project.get('version') == 'develop']
-
-    print(f"Found {len(filtered_projects)} projects with version 'develop'.")
+    print(f"Found {len(all_projects)} projects.")
 
     # Prepare list to store final data for Count.xlsx
     final_data = []
 
-    # For each filtered project, fetch findings using UUID
-    for project in filtered_projects:
+    # For each project, fetch findings using UUID
+    for project in all_projects:
         uuid = project.get('uuid')
         project_name = project.get('name')  # Get project name to use as filename
         if uuid and project_name:
