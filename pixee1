@@ -55,13 +55,5 @@ def main():
     else:
         print("No projects found.")
 
-    # Optional: Test single fetch without pagination to isolate auth issues
-    # try:
-    #     response = requests.get(API_URL, headers=HEADERS)
-    #     response.raise_for_status()
-    #     print("Single fetch without params succeeded:", response.json())
-    # except requests.exceptions.RequestException as e:
-    #     print("Single fetch error:", e)
-
 if __name__ == "__main__":
     main()
