@@ -1,49 +1,298 @@
-import re
+#!/usr/bin/env python3
+"""
+bulk_update_analysis.py
+
+- Fetch projects (paginated)
+- For filtered projects (version == 'develop'), fetch findings
+- For each finding with analysis state == "NOT_SET":
+    -> Try to set blank "" via PUT /api/v1/analysis
+    -> If server rejects, fall back to set "NOT_SET" (i.e., preserve original)
+- Save per-project findings to data/{project_name}.xlsx
+- Generate Count.xlsx and final.xlsx (Jar/Js counts)
+"""
+
+import os
+import requests
 import pandas as pd
-from pathlib import Path
+from typing import Optional
 
-# File paths
-COUNT_XLSX = Path("Count.xlsx")
-SLA_XLSX = Path("sla.xlsx")
-SLA_SHEET = "Daily_Monitoring_Apps"
-OUTPUT_SLA = Path("sla_with_not_set.xlsx")
+# ---------------- CONFIG ----------------
+API_URL_BASE = "https://dependencytrackapi.crm.com"  # <<-- set to your Dependency-Track base URL
+API_TOKEN = "your_token_here"                        # <<-- set your API token
+HEADERS = {
+    "X-Api-Key": API_TOKEN,
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+}
 
-def normalize_project_from_filename(fname):
-    """Remove _JAR/_Js suffixes and extensions, normalize project name."""
-    if pd.isna(fname):
-        return ""
-    s = str(fname).strip()
-    s = Path(s).stem  # drop extension
-    s = re.sub(r'(?i)(?:[_\-\.]?(?:jar|js))+$', '', s)  # remove _JAR/_Js
-    return s.strip("_-. ")
+PROJECTS_API = f"{API_URL_BASE}/api/v1/project"
+FINDINGS_PROJECT_API = f"{API_URL_BASE}/api/v1/finding/project"  # use as f"{...}/{project_uuid}"
+ANALYSIS_API = f"{API_URL_BASE}/api/v1/analysis"                 # PUT to create/update analysis
 
-# ---- Read Count.xlsx ----
-df_count = pd.read_excel(COUNT_XLSX, engine="openpyxl")
+DATA_DIR = "data"
+PAGE_LIMIT = 100
+# The "preferred" new state to try first (blank). If server rejects, fallback to FALLBACK_STATE.
+PREFERRED_NEW_STATE = ""       # blank attempt
+FALLBACK_STATE = "NOT_SET"     # if blank rejected, set to NOT_SET as requested
 
-# Find needed columns
-filename_col = [c for c in df_count.columns if "file" in c.lower()][0]
-analysis_col = [c for c in df_count.columns if "analysis" in c.lower() or "state" in c.lower()][0]
+os.makedirs(DATA_DIR, exist_ok=True)
 
-# Derive project name from filename
-df_count["Project"] = df_count[filename_col].apply(normalize_project_from_filename)
+# -------------- Helpers ---------------
+def safe_request(method, url, **kwargs):
+    """Central request wrapper to catch exceptions and print helpful logs."""
+    try:
+        resp = requests.request(method, url, headers=HEADERS, timeout=60, **kwargs)
+        return resp
+    except requests.exceptions.RequestException as e:
+        print(f"[EXC] {method} {url} -> {e}")
+        return None
 
-# Filter NOT_SET
-df_count["analysis_state_norm"] = df_count[analysis_col].astype(str).str.strip().str.upper()
-df_notset = df_count[df_count["analysis_state_norm"] == "NOT_SET"]
+# -------------- Fetching ---------------
+def fetch_all_projects():
+    all_projects = []
+    offset = 0
+    while True:
+        params = {"offset": offset, "limit": PAGE_LIMIT}
+        resp = safe_request("GET", PROJECTS_API, params=params)
+        if resp is None:
+            print("[ERR] Projects request failed.")
+            break
+        if not resp.ok:
+            print(f"[ERR] Projects request returned {resp.status_code}: {resp.text}")
+            break
+        try:
+            data = resp.json()
+        except Exception as e:
+            print(f"[ERR] Could not parse projects JSON: {e}")
+            break
+        if not data:
+            break
+        all_projects.extend(data)
+        print(f"[INFO] Fetched {len(data)} projects (offset {offset})")
+        if len(data) < PAGE_LIMIT:
+            break
+        offset += PAGE_LIMIT
+    return all_projects
 
-# Count by project
-counts = df_notset.groupby("Project").size().to_dict()
+def fetch_findings_for_project(project_uuid: str):
+    url = f"{FINDINGS_PROJECT_API}/{project_uuid}"
+    resp = safe_request("GET", url)
+    if resp is None:
+        return None
+    if not resp.ok:
+        print(f"[ERR] Findings GET for project {project_uuid} returned {resp.status_code}: {resp.text}")
+        return None
+    try:
+        return resp.json()
+    except Exception as e:
+        print(f"[ERR] Could not parse findings JSON for project {project_uuid}: {e}")
+        return None
 
-# ---- Read SLA.xlsx (only project column A) ----
-df_sla = pd.read_excel(SLA_XLSX, sheet_name=SLA_SHEET, engine="openpyxl", usecols=[0])
-df_sla.columns = ["Project"]
+# -------------- Analysis Upsert ---------------
+def put_analysis(payload: dict):
+    """Perform PUT to /api/v1/analysis with payload. Return (ok_bool, resp_or_text)."""
+    resp = safe_request("PUT", ANALYSIS_API, json=payload)
+    if resp is None:
+        return False, "request-exception"
+    if resp.ok:
+        # Some DT versions return empty body on success; return status/text for debugging
+        try:
+            return True, resp.json()
+        except Exception:
+            return True, resp.text
+    else:
+        return False, f"{resp.status_code}: {resp.text}"
 
-# Map counts to SLA projects
-df_sla["NOT_SET"] = df_sla["Project"].apply(
-    lambda p: counts.get(str(p).strip(), 0)
-)
+def attempt_set_analysis(project_uuid: str, component_uuid: str, vulnerability_uuid: str, desired_state: Optional[str], comment: Optional[str] = None):
+    """
+    Try to write analysis with desired_state (which may be "").
+    If server rejects (non-2xx), attempt fallback to FALLBACK_STATE.
+    Returns tuple (final_state, success_bool, server_response)
+    """
+    # Build payload - include keys explicitly. If desired_state is None, omit analysisState key.
+    base_payload = {
+        "project": project_uuid,
+        "component": component_uuid,
+        "vulnerability": vulnerability_uuid,
+        "analysisJustification": None,
+        "analysisResponse": None,
+        "analysisDetails": None,
+        "comment": comment,
+        "isSuppressed": False
+    }
+    # Attempt 1: preferred desired_state (could be empty string)
+    payload1 = base_payload.copy()
+    # set key even if blank string (server may treat empty string specially)
+    payload1["analysisState"] = desired_state
 
-# ---- Save result ----
-df_sla.to_excel(OUTPUT_SLA, sheet_name=SLA_SHEET, index=False)
+    ok1, resp1 = put_analysis(payload1)
+    if ok1:
+        return desired_state, True, resp1
 
-print(f"✅ Done. Output saved to {OUTPUT_SLA}")
+    # If attempt1 failed, do fallback to FALLBACK_STATE (explicit)
+    print(f"[WARN] Preferred state '{desired_state}' rejected for vuln {vulnerability_uuid} on comp {component_uuid}. Server: {resp1}")
+    payload2 = base_payload.copy()
+    payload2["analysisState"] = FALLBACK_STATE
+    ok2, resp2 = put_analysis(payload2)
+    if ok2:
+        return FALLBACK_STATE, True, resp2
+    else:
+        # both failed
+        print(f"[ERROR] Fallback '{FALLBACK_STATE}' also failed for vuln {vulnerability_uuid} on comp {component_uuid}. Server: {resp2}")
+        return None, False, resp2
+
+# -------------- Save findings to Excel ---------------
+def save_findings_to_excel(project_name: str, findings):
+    if isinstance(findings, list) and findings:
+        df = pd.json_normalize(findings)
+    else:
+        df = pd.DataFrame(columns=["uuid", "component.name", "analysis.state", "vulnerability"])
+    out_path = os.path.join(DATA_DIR, f"{project_name}.xlsx")
+    df.to_excel(out_path, index=False)
+    return df
+
+# -------------- Generate Count & final ---------------
+def generate_count_excel(final_data_rows):
+    df = pd.DataFrame(final_data_rows)
+    if 'analysis.state' in df.columns:
+        df['analysis.state'].fillna('Analysis Pending', inplace=True)
+    df.to_excel("Count.xlsx", index=False)
+    print("[INFO] Count.xlsx written.")
+
+def generate_final_summary():
+    summary = []
+    for fname in os.listdir(DATA_DIR):
+        if not fname.lower().endswith(".xlsx"):
+            continue
+        project_label = fname[:-5]
+        df = pd.read_excel(os.path.join(DATA_DIR, fname))
+        if 'component.name' in df.columns:
+            jar_ct = int(df['component.name'].astype(str).str.contains('jar', case=False, na=False).sum())
+            js_ct = int(df['component.name'].astype(str).str.contains('js', case=False, na=False).sum())
+        else:
+            jar_ct = 0
+            js_ct = 0
+        clean_name = project_label.split('_')[0].capitalize()
+        summary.append({"Filename": clean_name, "Jar count": jar_ct, "Js count": js_ct})
+    pd.DataFrame(summary).to_excel("final.xlsx", index=False)
+    print("[INFO] final.xlsx written.")
+
+# -------------- Main Flow ---------------
+def main():
+    print("[START] Fetching projects...")
+    projects = fetch_all_projects()
+    print(f"[INFO] Total projects fetched: {len(projects)}")
+
+    if not projects:
+        print("[ERR] No projects - exiting.")
+        return
+
+    # Save all projects for audit/debug
+    try:
+        pd.json_normalize(projects).to_excel("all_projects.xlsx", index=False)
+        print("[INFO] all_projects.xlsx saved.")
+    except Exception as e:
+        print(f"[WARN] Could not save all_projects.xlsx: {e}")
+
+    projects_df = pd.json_normalize(projects)
+
+    # filter like reference: version == 'develop'
+    if 'version' in projects_df.columns:
+        filtered = projects_df[projects_df['version'] == 'develop']
+    else:
+        filtered = projects_df
+
+    print(f"[INFO] Projects to process (version=='develop'): {len(filtered)}")
+
+    final_rows = []
+
+    for _, proj in filtered.iterrows():
+        project_uuid = proj.get('uuid')
+        project_name = proj.get('name') or f"project_{project_uuid}"
+        if not project_uuid:
+            print(f"[WARN] Skipping project without uuid: {proj}")
+            continue
+        print(f"\n[PROC] Project: {project_name} ({project_uuid})")
+
+        findings = fetch_findings_for_project(project_uuid)
+        if findings is None:
+            print(f"[WARN] No findings for project {project_uuid} or fetch failed.")
+            continue
+
+        # save findings as-is for reference
+        findings_df = save_findings_to_excel(project_name, findings)
+
+        # iterate findings list (each element likely dict)
+        for f in findings:
+            if not isinstance(f, dict):
+                continue
+
+            # Determine current analysis state (try multiple paths)
+            current_state = None
+            # If nested 'analysis' object is present, try to read 'analysisState' or 'state'
+            analysis_obj = f.get('analysis')
+            if isinstance(analysis_obj, dict):
+                current_state = analysis_obj.get('analysisState') or analysis_obj.get('state') or analysis_obj.get('analysis.state')
+            # fallback flattened keys
+            if current_state is None:
+                current_state = f.get('analysisState') or f.get('analysis.state') or f.get('analysis')
+
+            # normalize
+            cs = str(current_state).strip() if current_state is not None else None
+
+            # Build component.name for Count.xlsx
+            comp_name = None
+            if isinstance(f.get('component'), dict):
+                comp_name = f['component'].get('name')
+            comp_name = comp_name or f.get('component.name') or f.get('componentName') or "N/A"
+
+            # Build analysis_state value for Count.xlsx (use original)
+            analysis_state_val = cs or "Analysis Pending"
+
+            # If currently NOT_SET -> attempt update
+            if cs == "NOT_SET":
+                # gather UUIDs for vulnerability and component
+                vuln_uuid = None
+                comp_uuid = None
+
+                # vulnerability can be nested
+                if isinstance(f.get('vulnerability'), dict):
+                    vuln_uuid = f['vulnerability'].get('uuid') or f['vulnerability'].get('id') or f['vulnerability'].get('vulnerabilityId')
+                else:
+                    vuln_uuid = f.get('vulnerabilityUuid') or f.get('vulnerability') or f.get('vulnerabilityId')
+
+                if isinstance(f.get('component'), dict):
+                    comp_uuid = f['component'].get('uuid') or f['component'].get('id')
+                else:
+                    comp_uuid = f.get('component') or f.get('componentUuid')
+
+                if vuln_uuid and comp_uuid:
+                    final_state, success, server_resp = attempt_set_analysis(
+                        project_uuid=project_uuid,
+                        component_uuid=comp_uuid,
+                        vulnerability_uuid=vuln_uuid,
+                        desired_state=PREFERRED_NEW_STATE,
+                        comment="Bulk update: NOT_SET -> blank (fallback to NOT_SET if rejected)"
+                    )
+                    if success:
+                        print(f"[OK] vuln {vuln_uuid} comp {comp_uuid} -> final_state: {final_state}")
+                        analysis_state_val = final_state or analysis_state_val
+                    else:
+                        print(f"[ERR] Could not write analysis for vuln {vuln_uuid} comp {comp_uuid}. Server: {server_resp}")
+                else:
+                    print(f"[SKIP] Missing vuln/component UUID: vuln={vuln_uuid}, comp={comp_uuid}")
+
+            # append row for Count.xlsx
+            final_rows.append({
+                "Filename": project_name,
+                "component.name": comp_name,
+                "analysis.state": analysis_state_val
+            })
+
+    # write outputs
+    generate_count_excel(final_rows)
+    generate_final_summary()
+    print("[DONE] All done.")
+
+if __name__ == "__main__":
+    main()
