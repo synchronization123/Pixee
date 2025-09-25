@@ -1,187 +1,146 @@
-#!/usr/bin/env python3
-"""
-inspect_and_login.py
-
-Usage:
-    python inspect_and_login.py https://example.com/login
-
-What it does:
- - GETs the provided URL and finds <form> elements.
- - Prints detected input field names/types/defaults (including hidden tokens).
- - If form contains both username & password fields, prompts and attempts login.
- - If form contains only username (two-step), it will submit username, GET next page, and show fields for password.
- - Prints final redirected URL (if any) and helpful HTML snippet on failure.
-
-Dependencies:
-    pip install requests beautifulsoup4
-"""
-import sys
 import requests
-from bs4 import BeautifulSoup
-from getpass import getpass
-from urllib.parse import urljoin
+import pandas as pd
+import os
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-]
+# API details
+API_URL = "https://dependencytrackapi.crm.com/api/v1/project"
+FINDINGS_API_URL = "https://dependencytrackapi.crm/api/v1/finding/project"
+API_TOKEN = "abccc"
+HEADERS = {
+    "X-Api-Key": API_TOKEN,
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+}
 
-COMMON_USERNAMES = {"username","user","login","email","j_username","userid"}
-COMMON_PASSWORDS = {"password","pass","j_password"}
+def fetch_all_dependency_data():
+    """Fetch all pages of Dependency Track API data."""
+    all_data = []
+    page = 1
+    limit = 100  # Number of records per request
 
-def parse_forms(html, base_url):
-    soup = BeautifulSoup(html, "html.parser")
-    forms = []
-    for f in soup.find_all("form"):
-        action = f.get("action") or ""
-        post_url = action if action.startswith("http") else urljoin(base_url, action)
-        method = (f.get("method") or "get").lower()
-        inputs = []
-        for inp in f.find_all("input"):
-            name = inp.get("name")
-            if not name:
-                continue
-            inputs.append({
-                "name": name,
-                "type": (inp.get("type") or "text").lower(),
-                "id": inp.get("id"),
-                "value": inp.get("value", "")
+    while True:
+        params = {"page": page, "limit": limit}  # Pagination parameters
+        try:
+            response = requests.get(API_URL, headers=HEADERS, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+            if not data:
+                break  # Stop if no more records
+            
+            all_data.extend(data)  # Append current batch to full list
+
+            print(f"Fetched {len(data)} records from page {page}")
+
+            # Stop if fewer than 'limit' records are returned (last page)
+            if len(data) < limit:
+                break
+
+            page += 1  # Move to next page
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching data: {e}")
+            break
+
+    return all_data
+
+def fetch_findings_for_uuid(uuid, project_name):
+    """Fetch findings for a specific UUID."""
+    url = f"{FINDINGS_API_URL}/{uuid}"
+    try:
+        response = requests.get(url, headers=HEADERS)
+        response.raise_for_status()
+        data = response.json()
+
+        # If no data found, create a blank Excel with headers
+        if not data:
+            print(f"No findings for UUID: {uuid}. Saving blank Excel.")
+            df = pd.DataFrame(columns=["Finding", "Severity", "Description", "analysis.state", "component.name"])  # Example headers
+            df.to_excel(f"data/{project_name}.xlsx", index=False)
+            print(f"Blank Excel file created for UUID: {uuid} with name {project_name}.xlsx")
+            return None
+        else:
+            # Convert findings data to a DataFrame and save to Excel
+            df = pd.json_normalize(data)
+            df.to_excel(f"data/{project_name}.xlsx", index=False)
+            print(f"Data successfully saved for UUID: {uuid} with name {project_name}.xlsx")
+
+            # Check if 'analysis.state' column exists, else add "Analysis Pending"
+            if 'analysis.state' not in df.columns:
+                df['analysis.state'] = 'Analysis Pending'
+                df.to_excel(f"data/{project_name}.xlsx", index=False)
+                print(f"Added 'Analysis Pending' to 'analysis.state' column for {project_name}.xlsx")
+            return df
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching findings for UUID {uuid}: {e}")
+        return None
+
+def generate_count_excel(final_data):
+    """Generate Count.xlsx with Filename, component.name, analysis.state."""
+    # Fill any missing 'analysis.state' with 'Analysis Pending'
+    final_df = pd.DataFrame(final_data)
+    final_df['analysis.state'].fillna('Analysis Pending', inplace=True)
+    final_df.to_excel("Count.xlsx", index=False)
+    print("Count.xlsx has been successfully created with filenames, component names, and analysis state.")
+
+def generate_final_summary():
+    """Generate final.xlsx with Filename, Jar count, Js count."""
+    final_summary = []
+
+    # Loop through each file in the 'data' folder
+    for file in os.listdir("data"):
+        if file.endswith(".xlsx"):
+            filename = file.replace(".xlsx", "")  # Remove .xlsx extension
+            project_df = pd.read_excel(f"data/{file}")
+
+            # Count occurrences of 'jar' and 'js' in component.name
+            jar_count = project_df[project_df['component.name'].str.contains('jar', case=False, na=False)].shape[0]
+            js_count = project_df[project_df['component.name'].str.contains('js', case=False, na=False)].shape[0]
+
+            # Clean up the filename (e.g., crm_jar → Crm)
+            clean_filename = filename.split('_')[0].capitalize()
+
+            final_summary.append({
+                'Filename': clean_filename,
+                'Jar count': jar_count,
+                'Js count': js_count
             })
-        forms.append({"post_url": post_url, "method": method, "inputs": inputs, "form_tag": str(f)[:200]})
-    return forms
 
-def pretty_print_form(f, index):
-    print(f"\n=== Form #{index+1} ===")
-    print("POST URL:", f["post_url"])
-    print("METHOD:", f["method"].upper())
-    print("Inputs found:")
-    for inp in f["inputs"]:
-        print(f"  - name='{inp['name']}', type='{inp['type']}', id='{inp['id']}', default='{inp['value']}'")
-
-def find_field_names(inputs):
-    uname = None
-    pwd = None
-    hidden = {}
-    for inp in inputs:
-        n = inp["name"].lower()
-        t = inp["type"]
-        if t == "hidden":
-            hidden[inp["name"]] = inp["value"]
-        if not uname and n in COMMON_USERNAMES:
-            uname = inp["name"]
-        if not pwd and n in COMMON_PASSWORDS:
-            pwd = inp["name"]
-    return uname, pwd, hidden
+    # Convert summary to DataFrame and save to final.xlsx
+    summary_df = pd.DataFrame(final_summary)
+    summary_df.to_excel("final.xlsx", index=False)
+    print("final.xlsx has been successfully created with Jar and Js counts.")
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python inspect_and_login.py <login_page_url>")
-        sys.exit(1)
+    # Fetch all projects to get UUIDs
+    all_projects = fetch_all_dependency_data()
 
-    url = sys.argv[1].rstrip("/")
-    session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENTS[0], "Accept": "text/html"})
-    print("[*] Fetching login page:", url)
-    r = session.get(url, timeout=20)
-    r.raise_for_status()
-    forms = parse_forms(r.text, url)
+    # Filter projects where version is 'develop'
+    filtered_projects = [project for project in all_projects if project.get('version') == 'develop']
 
-    if not forms:
-        print("[!] No <form> elements found on the page. Here's a short snippet:")
-        print(r.text[:2000])
-        sys.exit(1)
+    print(f"Found {len(filtered_projects)} projects with version 'develop'.")
 
-    for i, f in enumerate(forms):
-        pretty_print_form(f, i)
+    # Prepare list to store final data for Count.xlsx
+    final_data = []
 
-    # Choose which form to use: prefer one with 'login' in action or first form
-    chosen = None
-    for f in forms:
-        if "login" in f["post_url"].lower() or "login" in f.get("form_tag","").lower():
-            chosen = f
-            break
-    if chosen is None:
-        chosen = forms[0]
+    # For each filtered project, fetch findings using UUID
+    for project in filtered_projects:
+        uuid = project.get('uuid')
+        project_name = project.get('name')  # Get project name to use as filename
+        if uuid and project_name:
+            df = fetch_findings_for_uuid(uuid, project_name)
+            if df is not None:
+                # Extract component.name and analysis.state for each row and add to final data
+                for _, row in df.iterrows():
+                    component_name = row.get('component.name', 'N/A')
+                    analysis_state = row.get('analysis.state', 'Analysis Pending')
+                    final_data.append({"Filename": project_name, "component.name": component_name, "analysis.state": analysis_state})
 
-    print("\n[*] Using form with action:", chosen["post_url"])
-    uname_field, pwd_field, hidden = find_field_names(chosen["inputs"])
-    print("[*] Detected username field:", uname_field)
-    print("[*] Detected password field:", pwd_field)
-    if hidden:
-        print("[*] Hidden/default inputs discovered:", hidden)
+    # Generate Count.xlsx with filenames, component names, and analysis state
+    generate_count_excel(final_data)
 
-    # If only username present -> two-step flow likely. Handle both cases.
-    if uname_field and not pwd_field:
-        print("\n[>] Looks like a two-step flow: username is present but password is NOT in the same form.")
-        username = input("Enter username: ")
-        payload = hidden.copy()
-        payload[uname_field] = username
-        headers = {"Referer": url}
-        print("[*] Submitting username to:", chosen["post_url"])
-        resp = session.post(chosen["post_url"], data=payload, headers=headers, allow_redirects=True, timeout=20)
-        print("[*] HTTP status after username submit:", resp.status_code)
-        print("[*] Final URL:", resp.url)
-        # Parse the returned page to find next form (likely containing password now)
-        forms2 = parse_forms(resp.text, resp.url)
-        if not forms2:
-            print("[!] No form found after username submit. Here's a snippet of the response HTML:")
-            print(resp.text[:2000])
-            sys.exit(1)
-        # Show forms and prompt for password if found
-        for i, f2 in enumerate(forms2):
-            pretty_print_form(f2, i)
-        # Attempt to find password field now
-        f2 = forms2[0]  # try first
-        uname2, pwd2, hidden2 = find_field_names(f2["inputs"])
-        print("[*] On second page - detected password field:", pwd2)
-        password = getpass("Password: ")
-        # Build payload for second step
-        payload2 = hidden2.copy()
-        # include password and maybe username if needed by second form
-        if pwd2:
-            payload2[pwd2] = password
-        else:
-            # fallback: try common names
-            payload2["password"] = password
-        # include username if second form expects it
-        if uname2:
-            payload2[uname2] = username
-        headers = {"Referer": resp.url}
-        print("[*] Submitting password to:", f2["post_url"])
-        resp2 = session.post(f2["post_url"], data=payload2, headers=headers, allow_redirects=True, timeout=20)
-        print("[*] Final HTTP status:", resp2.status_code)
-        print("[*] Final URL after redirects:", resp2.url)
-        body = resp2.text.lower()
-        if resp2.url != url and any(k in body for k in ("logout","sign out","dashboard","welcome","my account")):
-            print("✅ Login appears successful. Final URL:", resp2.url)
-        else:
-            print("❌ Login may have failed. Response snippet:")
-            print(resp2.text[:2000])
-        return
-
-    # Case: both username and password in same form (single step)
-    if uname_field and pwd_field:
-        username = input("Username: ")
-        password = getpass("Password: ")
-        payload = hidden.copy()
-        payload[uname_field] = username
-        payload[pwd_field] = password
-        headers = {"Referer": url}
-        print("[*] Submitting credentials to:", chosen["post_url"])
-        resp = session.post(chosen["post_url"], data=payload, headers=headers, allow_redirects=True, timeout=20)
-        print("[*] HTTP status:", resp.status_code)
-        print("[*] Final URL after redirects:", resp.url)
-        body = resp.text.lower()
-        if resp.url != url and any(k in body for k in ("logout","sign out","dashboard","welcome","my account")):
-            print("✅ Login appears successful. Final URL:", resp.url)
-        else:
-            print("❌ Login may have failed. Response snippet:")
-            print(resp.text[:2000])
-        return
-
-    # Fallback: no obvious username field - show form and exit
-    print("[!] Could not detect proper username/password fields automatically. Inspect the form printed above and re-run, or try Selenium if page is JS-dependent.")
-    sys.exit(2)
+    # Generate final.xlsx with Jar and Js counts
+    generate_final_summary()
 
 if __name__ == "__main__":
     main()
