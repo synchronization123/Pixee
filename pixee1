@@ -3,9 +3,9 @@ import pandas as pd
 
 # API details
 API_URL = "https://dependencytrackapi.crm.com/api/v1/project"
-USERNAME = "your_username"  # Replace with your actual username
-PASSWORD = "your_password"  # Replace with your actual password
+API_TOKEN = "your_token"  # Replace with your actual token
 HEADERS = {
+    "X-Api-Key": API_TOKEN,
     "Content-Type": "application/json",
     "Accept": "application/json"
 }
@@ -19,7 +19,7 @@ def fetch_all_projects():
     while True:
         params = {"page": page, "limit": limit}  # Pagination parameters
         try:
-            response = requests.get(API_URL, headers=HEADERS, params=params, auth=(USERNAME, PASSWORD))
+            response = requests.get(API_URL, headers=HEADERS, params=params)
             response.raise_for_status()
             data = response.json()
 
