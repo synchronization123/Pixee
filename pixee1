@@ -1,160 +1,146 @@
-import requests
+"""
+Produce an updated sla.xlsx with a NOT_SET column containing counts of NOT_SET
+states from Count.xlsx.
+
+Assumptions & behavior:
+- Count.xlsx should contain:
+    - a column named exactly 'Filename' (case-insensitive) OR a column containing 'file'
+      (will try to find best match).
+    - a column named 'analysis.state' (case-insensitive) OR a column containing 'analysis' or 'state'.
+    - optionally a project column (containing 'project' in its name). If not present, the script
+      derives the project name from the Filename by removing trailing suffixes _JAR and _Js (case-insensitive),
+      and trimming spaces.
+- sla.xlsx must contain the sheet 'Daily_Monitoring_Apps'. Project names are taken from column A.
+- Result is written to 'sla_with_not_set.xlsx' (does not overwrite original by default).
+"""
+
+import re
+import sys
 import pandas as pd
-import os
+from pathlib import Path
 
-# API details
-API_URL = "https://dependencytrackapi.crm.com/api/v1/project"
-FINDINGS_API_URL = "https://dependencytrackapi.crm.com/api/v1/finding/project"
-API_TOKEN = "your_token"  # Replace with your actual token
-HEADERS = {
-    "X-Api-Key": API_TOKEN,
-    "Content-Type": "application/json",
-    "Accept": "application/json"
-}
+# Input file names (change if needed)
+COUNT_XLSX = Path("Count.xlsx")
+SLA_XLSX = Path("sla.xlsx")
+SLA_SHEET = "Daily_Monitoring_Apps"
+OUTPUT_SLA = Path("sla_with_not_set.xlsx")
 
-def fetch_all_projects():
-    """Fetch all pages of projects from Dependency Track API."""
-    all_data = []
-    offset = 0
-    limit = 100  # Number of records per request
+def find_column(df, candidates):
+    """Find first column in df whose name matches any candidate substring (case-insensitive)."""
+    cols_lower = {c.lower(): c for c in df.columns}
+    for cand in candidates:
+        for lower, orig in cols_lower.items():
+            if cand.lower() in lower:
+                return orig
+    return None
 
-    while True:
-        params = {"offset": offset, "limit": limit}  # Pagination parameters
-        try:
-            response = requests.get(API_URL, headers=HEADERS, params=params)
-            response.raise_for_status()
-            data = response.json()
-
-            if not data:
-                break  # Stop if no more records
-            
-            all_data.extend(data)  # Append current batch to full list
-
-            print(f"Fetched {len(data)} records at offset {offset}")
-
-            # Stop if fewer than 'limit' records are returned (last page)
-            if len(data) < limit:
-                break
-
-            offset += limit  # Move to next offset
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching data: {e}")
-            break
-
-    return all_data
-
-def fetch_findings_for_uuid(uuid, project_name):
-    """Fetch findings for a specific UUID."""
-    url = f"{FINDINGS_API_URL}/{uuid}"
-    try:
-        response = requests.get(url, headers=HEADERS)
-        response.raise_for_status()
-        data = response.json()
-
-        # If no data found, create a blank Excel with headers
-        if not data:
-            print(f"No findings for UUID: {uuid}. Saving blank Excel.")
-            df = pd.DataFrame(columns=["Finding", "Severity", "Description", "analysis.state", "component.name"])  # Example headers
-            df.to_excel(f"data/{project_name}.xlsx", index=False)
-            print(f"Blank Excel file created for UUID: {uuid} with name {project_name}.xlsx")
-            return None
-        else:
-            # Convert findings data to a DataFrame and save to Excel
-            df = pd.json_normalize(data)
-            df.to_excel(f"data/{project_name}.xlsx", index=False)
-            print(f"Data successfully saved for UUID: {uuid} with name {project_name}.xlsx")
-
-            # Check if 'analysis.state' column exists, else add "Analysis Pending"
-            if 'analysis.state' not in df.columns:
-                df['analysis.state'] = 'Analysis Pending'
-                df.to_excel(f"data/{project_name}.xlsx", index=False)
-                print(f"Added 'Analysis Pending' to 'analysis.state' column for {project_name}.xlsx")
-            return df
-
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching findings for UUID {uuid}: {e}")
-        return None
-
-def generate_count_excel(final_data):
-    """Generate Count.xlsx with Filename, component.name, analysis.state."""
-    # Fill any missing 'analysis.state' with 'Analysis Pending'
-    final_df = pd.DataFrame(final_data)
-    final_df['analysis.state'].fillna('Analysis Pending', inplace=True)
-    final_df.to_excel("Count.xlsx", index=False)
-    print("Count.xlsx has been successfully created with filenames, component names, and analysis state.")
-
-def generate_final_summary():
-    """Generate final.xlsx with Filename, Jar count, Js count."""
-    final_summary = []
-
-    # Loop through each file in the 'data' folder
-    for file in os.listdir("data"):
-        if file.endswith(".xlsx"):
-            filename = file.replace(".xlsx", "")  # Remove .xlsx extension
-            project_df = pd.read_excel(f"data/{file}")
-
-            # Count occurrences of 'jar' and 'js' in component.name
-            jar_count = project_df[project_df['component.name'].str.contains('jar', case=False, na=False)].shape[0]
-            js_count = project_df[project_df['component.name'].str.contains('js', case=False, na=False)].shape[0]
-
-            # Clean up the filename (e.g., crm_jar → Crm)
-            clean_filename = filename.split('_')[0].capitalize()
-
-            final_summary.append({
-                'Filename': clean_filename,
-                'Jar count': jar_count,
-                'Js count': js_count
-            })
-
-    # Convert summary to DataFrame and save to final.xlsx
-    summary_df = pd.DataFrame(final_summary)
-    summary_df.to_excel("final.xlsx", index=False)
-    print("final.xlsx has been successfully created with Jar and Js counts.")
+def normalize_project_from_filename(fname):
+    """Derive project name from filename by removing trailing _JAR or _Js (case-insensitive)
+       and stripping whitespace and file extensions if present."""
+    if pd.isna(fname):
+        return ""
+    s = str(fname).strip()
+    # If filename includes path, take basename
+    s = Path(s).stem  # removes extension like .zip/.jar/etc
+    # Remove common suffixes _JAR or _Js (case-insensitive) possibly repeated, and trailing separators
+    # Use regex to strip one or more occurrences at the end
+    s = re.sub(r'(?i)(?:[_\-\.]?(?:jar|js))+$', '', s)  # remove -jar, _JAR, .js, etc
+    s = s.strip("_-. ").strip()
+    return s
 
 def main():
-    # Fetch all projects
-    all_projects = fetch_all_projects()
+    # validate files
+    if not COUNT_XLSX.exists():
+        print(f"ERROR: {COUNT_XLSX} not found.")
+        sys.exit(1)
+    if not SLA_XLSX.exists():
+        print(f"ERROR: {SLA_XLSX} not found.")
+        sys.exit(1)
 
-    print(f"Found {len(all_projects)} projects.")
+    # Read Count.xlsx
+    df_count = pd.read_excel(COUNT_XLSX, engine="openpyxl")
+    # Try to detect filename column
+    filename_col = find_column(df_count, ["filename", "file", "name"])
+    if filename_col is None:
+        raise ValueError("Could not find a Filename column in Count.xlsx (looking for 'filename'/'file'/'name').")
 
-    # Convert to DataFrame and save to Excel
-    if all_projects:
-        df = pd.json_normalize(all_projects)
-        df.to_excel("all_projects.xlsx", index=False)
-        print("All projects saved to all_projects.xlsx")
+    # Try to detect analysis.state column
+    analysis_col = find_column(df_count, ["analysis.state", "analysis", "state"])
+    if analysis_col is None:
+        raise ValueError("Could not find an analysis.state column in Count.xlsx (looking for 'analysis.state'/'analysis'/'state').")
+
+    # Try to detect explicit project column; if absent we'll derive from filename
+    project_col = find_column(df_count, ["project", "project name", "project_name"])
+    if project_col:
+        # use explicit column but normalize whitespace and strings
+        df_count["__project_used"] = df_count[project_col].fillna("").astype(str).str.strip()
     else:
-        print("No projects found.")
-        return
+        # derive from Filename
+        df_count["__project_used"] = df_count[filename_col].apply(normalize_project_from_filename)
 
-    # Filter projects where version is 'develop'
-    filtered_projects = df[df['version'] == 'develop']
+    # Normalize analysis.state values and create boolean NOT_SET indicator
+    df_count["__analysis_state_norm"] = df_count[analysis_col].astype(str).str.strip().str.upper()
+    df_count["__is_NOT_SET"] = df_count["__analysis_state_norm"] == "NOT_SET"
 
-    print(f"Found {len(filtered_projects)} projects with version 'develop'.")
+    # Group counts of NOT_SET by project name
+    counts = (
+        df_count[df_count["__is_NOT_SET"]]
+        .groupby("__project_used", dropna=False)
+        .size()
+        .rename("NOT_SET_count")
+        .reset_index()
+    )
+    # Convert to dict for fast lookup
+    counts_map = dict(zip(counts["__project_used"], counts["NOT_SET_count"]))
 
-    # Create 'data' directory if it doesn't exist
-    os.makedirs("data", exist_ok=True)
+    # Read SLA sheet
+    xl = pd.ExcelFile(SLA_XLSX, engine="openpyxl")
+    if SLA_SHEET not in xl.sheet_names:
+        raise ValueError(f"Sheet '{SLA_SHEET}' not found in {SLA_XLSX}. Available sheets: {xl.sheet_names}")
+    df_sla = xl.parse(SLA_SHEET, header=0)
 
-    # Prepare list to store final data for Count.xlsx
-    final_data = []
+    # Project names are in column A (first column)
+    first_col_name = df_sla.columns[0]
+    # Normalize SLA project names for matching
+    def normalize_sla_proj(val):
+        if pd.isna(val):
+            return ""
+        return str(val).strip()
 
-    # For each filtered project, fetch findings using UUID
-    for _, row in filtered_projects.iterrows():
-        uuid = row.get('uuid')
-        project_name = row.get('name')  # Get project name to use as filename
-        if uuid and project_name:
-            findings_df = fetch_findings_for_uuid(uuid, project_name)
-            if findings_df is not None:
-                # Extract component.name and analysis.state for each row and add to final data
-                for _, finding_row in findings_df.iterrows():
-                    component_name = finding_row.get('component.name', 'N/A')
-                    analysis_state = finding_row.get('analysis.state', 'Analysis Pending')
-                    final_data.append({"Filename": project_name, "component.name": component_name, "analysis.state": analysis_state})
+    df_sla["_SLA_proj_normalized"] = df_sla[first_col_name].apply(normalize_sla_proj)
 
-    # Generate Count.xlsx with filenames, component names, and analysis state
-    generate_count_excel(final_data)
+    # Map counts to SLA rows; default 0 when not found
+    def lookup_count(sla_proj):
+        # exact match first
+        if sla_proj in counts_map:
+            return int(counts_map[sla_proj])
+        # try case-insensitive match
+        for k, v in counts_map.items():
+            if k.lower() == sla_proj.lower():
+                return int(v)
+        # try removing suffixes from SLA proj name and match again
+        short = normalize_project_from_filename(sla_proj)
+        if short in counts_map:
+            return int(counts_map[short])
+        for k, v in counts_map.items():
+            if k.lower() == short.lower():
+                return int(v)
+        return 0
 
-    # Generate final.xlsx with Jar and Js counts
-    generate_final_summary()
+    df_sla["NOT_SET"] = df_sla["_SLA_proj_normalized"].apply(lookup_count)
+
+    # Drop helper column and write to new excel file (preserve existing sheet names if needed)
+    df_sla = df_sla.drop(columns=["_SLA_proj_normalized"])
+
+    # Write result to new workbook (single sheet)
+    with pd.ExcelWriter(OUTPUT_SLA, engine="openpyxl") as writer:
+        df_sla.to_excel(writer, sheet_name=SLA_SHEET, index=False)
+
+    print(f"Done. Wrote updated SLA sheet to: {OUTPUT_SLA}")
+    print("Summary of NOT_SET counts (sample up to 20):")
+    sample = {k: v for i, (k, v) in enumerate(counts_map.items()) if i < 20}
+    for k, v in sample.items():
+        print(f"  {k!s}: {v}")
 
 if __name__ == "__main__":
     main()
