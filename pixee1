@@ -13,11 +13,11 @@ HEADERS = {
 def fetch_all_projects():
     """Fetch all pages of projects from Dependency Track API."""
     all_data = []
-    page = 1
+    offset = 0
     limit = 100  # Number of records per request
 
     while True:
-        params = {"page": page, "limit": limit}  # Pagination parameters
+        params = {"offset": offset, "limit": limit}  # Pagination parameters
         try:
             response = requests.get(API_URL, headers=HEADERS, params=params)
             response.raise_for_status()
@@ -28,13 +28,13 @@ def fetch_all_projects():
             
             all_data.extend(data)  # Append current batch to full list
 
-            print(f"Fetched {len(data)} records from page {page}")
+            print(f"Fetched {len(data)} records at offset {offset}")
 
             # Stop if fewer than 'limit' records are returned (last page)
             if len(data) < limit:
                 break
 
-            page += 1  # Move to next page
+            offset += limit  # Move to next offset
         except requests.exceptions.RequestException as e:
             print(f"Error fetching data: {e}")
             break
@@ -54,6 +54,14 @@ def main():
         print("All projects saved to all_projects.xlsx")
     else:
         print("No projects found.")
+
+    # Optional: Test single fetch without pagination to isolate auth issues
+    # try:
+    #     response = requests.get(API_URL, headers=HEADERS)
+    #     response.raise_for_status()
+    #     print("Single fetch without params succeeded:", response.json())
+    # except requests.exceptions.RequestException as e:
+    #     print("Single fetch error:", e)
 
 if __name__ == "__main__":
     main()
