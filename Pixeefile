@@ -1,1 +1,115 @@
-..
+1. Purpose
+
+The purpose of this project is to identify and mitigate potential single points of failure related to third-party integrations. The project also aims to strengthen resilience by ensuring proper vendor evaluation, monitoring, and security controls are in place.
+
+
+---
+
+2. Objectives
+
+Assess risks associated with existing and planned third-party vendor integrations.
+
+Gather feedback from developers and QA leads to understand current vendor dependencies.
+
+Evaluate whether rate limiting and monitoring are implemented for critical services.
+
+Identify and mitigate single points of failure in the system.
+
+Document findings and raise Jira tickets for remediation where required.
+
+
+
+---
+
+3. Scope of Work
+
+In-Scope
+
+Collection and analysis of third-party vendor inputs.
+
+Review of findings with key stakeholders (Daniel, Rahul).
+
+Functional assessment of rate limiting and monitoring mechanisms.
+
+Raising Jira tickets for identified issues and gaps.
+
+Recommendations for extending or modifying third-party service integrations.
+
+
+Out-of-Scope
+
+Replacement or procurement of new vendors.
+
+Implementation of all remediation actions (to be tracked separately).
+
+Full system redesign beyond identified critical points.
+
+
+
+---
+
+4. Deliverables
+
+Consolidated analysis report of third-party vendor dependencies.
+
+Findings and recommendations from functional assessments.
+
+List of Jira tickets raised for remediation.
+
+Stakeholder review summary (Daniel, Rahul).
+
+Final scope recommendation for extended third-party service integrations.
+
+
+
+---
+
+5. Assumptions
+
+All developers and QA leads will provide accurate and timely feedback.
+
+Third-party vendor documentation is available for review.
+
+Monitoring and logging systems provide sufficient visibility for assessment.
+
+
+
+---
+
+6. Constraints
+
+Limited to existing third-party vendors within current system boundaries.
+
+Timeline is dependent on feedback and availability of stakeholders.
+
+Resource availability may impact depth of functional assessments.
+
+
+
+---
+
+7. Timeline (High-Level)
+
+Week 1–2: Collect responses and conduct vendor input analysis (Ram).
+
+Week 3: Review analysis with Daniel.
+
+Week 4: Review analysis with Rahul.
+
+Week 5: Functional assessment of rate limiting and monitoring (Sam).
+
+Week 6: Consolidated report and Jira ticket tracking.
+
+
+
+---
+
+8. Stakeholders
+
+Project Sponsor: [Department Head / Security Lead]
+
+Project Manager: [Your Name]
+
+Analysis Lead: Ram
+
+Reviewer: Daniel
