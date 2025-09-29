@@ -1,21 +1,19 @@
 1. Purpose
 
-The purpose of this project is to identify and mitigate potential single points of failure related to third-party integrations. The project also aims to strengthen resilience by ensuring proper vendor evaluation, monitoring, and security controls are in place.
+The purpose of this project is to strengthen the security posture of Python-based applications and services. This includes hardening frameworks (FastAPI, Unicorn, Hypercorn), performing code reviews, and ensuring best practices are consistently applied.
 
 
 ---
 
 2. Objectives
 
-Assess risks associated with existing and planned third-party vendor integrations.
+Complete hardening activities for FastAPI framework.
 
-Gather feedback from developers and QA leads to understand current vendor dependencies.
+Conduct research and analysis for Unicorn and Hypercorn frameworks.
 
-Evaluate whether rate limiting and monitoring are implemented for critical services.
+Perform Python code reviews to identify vulnerabilities and areas for improvement.
 
-Identify and mitigate single points of failure in the system.
-
-Document findings and raise Jira tickets for remediation where required.
+Share findings and recommendations with the development and security teams.
 
 
 
@@ -25,24 +23,24 @@ Document findings and raise Jira tickets for remediation where required.
 
 In-Scope
 
-Collection and analysis of third-party vendor inputs.
+Hardening of FastAPI framework (completed).
 
-Review of findings with key stakeholders (Daniel, Rahul).
+Research and analysis for Unicorn and Hypercorn frameworks.
 
-Functional assessment of rate limiting and monitoring mechanisms.
+Comprehensive Python code review (completed).
 
-Raising Jira tickets for identified issues and gaps.
+Sharing finalized review reports with the team.
 
-Recommendations for extending or modifying third-party service integrations.
+Recommendations for secure configurations, patching, and coding standards.
 
 
 Out-of-Scope
 
-Replacement or procurement of new vendors.
+Development of new features in frameworks.
 
-Implementation of all remediation actions (to be tracked separately).
+Long-term monitoring of all services (to be handled under ongoing security operations).
 
-Full system redesign beyond identified critical points.
+Vendor-driven changes or patches outside organizational control.
 
 
 
@@ -50,15 +48,13 @@ Full system redesign beyond identified critical points.
 
 4. Deliverables
 
-Consolidated analysis report of third-party vendor dependencies.
+Hardened FastAPI framework documentation and configurations.
 
-Findings and recommendations from functional assessments.
+Research & analysis report for Unicorn and Hypercorn.
 
-List of Jira tickets raised for remediation.
+Completed Python code review report.
 
-Stakeholder review summary (Daniel, Rahul).
-
-Final scope recommendation for extended third-party service integrations.
+Team knowledge-sharing session with findings and recommendations.
 
 
 
@@ -66,11 +62,11 @@ Final scope recommendation for extended third-party service integrations.
 
 5. Assumptions
 
-All developers and QA leads will provide accurate and timely feedback.
+Security guidelines and industry best practices (e.g., OWASP, CIS Benchmarks) are available.
 
-Third-party vendor documentation is available for review.
+Development teams are available for review and knowledge-sharing sessions.
 
-Monitoring and logging systems provide sufficient visibility for assessment.
+All activities are aligned with organizational security policies.
 
 
 
@@ -78,11 +74,11 @@ Monitoring and logging systems provide sufficient visibility for assessment.
 
 6. Constraints
 
-Limited to existing third-party vendors within current system boundaries.
+Project deadlines are fixed for each framework phase.
 
-Timeline is dependent on feedback and availability of stakeholders.
+Limited to frameworks in use (FastAPI, Unicorn, Hypercorn).
 
-Resource availability may impact depth of functional assessments.
+Availability of experts for framework-specific analysis may impact schedule.
 
 
 
@@ -90,26 +86,14 @@ Resource availability may impact depth of functional assessments.
 
 7. Timeline (High-Level)
 
-Week 1–2: Collect responses and conduct vendor input analysis (Ram).
+18 Aug – 19 Sep 2025: FastAPI Hardening ✅ (Completed).
 
-Week 3: Review analysis with Daniel.
+23 Sep – 23 Nov 2025 (Tentative): Unicorn & Hypercorn Research and Analysis (Planned).
 
-Week 4: Review analysis with Rahul.
+Ongoing: Python Code Review ✅ (Completed, report pending sharing).
 
-Week 5: Functional assessment of rate limiting and monitoring (Sam).
-
-Week 6: Consolidated report and Jira ticket tracking.
+Final Week of Nov 2025: Consolidated reporting and knowledge-sharing session.
 
 
 
 ---
-
-8. Stakeholders
-
-Project Sponsor: [Department Head / Security Lead]
-
-Project Manager: [Your Name]
-
-Analysis Lead: Ram
-
-Reviewer: Daniel
