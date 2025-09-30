@@ -1,58 +1,38 @@
-import pandas as pd
-from collections import defaultdict
-import openpyxl
+Title:
+Open Redirect Vulnerability in SmallURL Service Allows Phishing via Company Domain
 
-# Read the input Excel file without headers
-df = pd.read_excel('data.xlsx', header=None)
+Description:
+The internal URL-shortening service SmallURL currently allows creation of short links for arbitrary external destinations without validation.
 
-# Convert columns B (1) and C (2) to object dtype to allow mixed types
-df[1] = df[1].astype(object)
-df[2] = df[2].astype(object)
+For example:
 
-# Initialize dictionaries to hold lists of E and F for each filename (case-insensitive)
-E_dict = defaultdict(list)
-F_dict = defaultdict(list)
+https://smallurl.crm.com/newurl=https://google.com
 
-# Iterate over rows to populate the dictionaries from columns D (3), E (4), F (5)
-for j in range(len(df)):
-    if pd.notna(df.iloc[j, 3]):
-        # Extract filename from column D, lowercase
-        fn = str(df.iloc[j, 3]).split('/')[-1].lower()
-        E = df.iloc[j, 4]
-        F = df.iloc[j, 5]
-        if pd.notna(E):
-            E_dict[fn].append(str(E))
-        if pd.notna(F):
-            F_dict[fn].append(str(F))
+produces:
 
-# Now, for each row in column A (0), match filename and assign to B (1) and C (2)
-used_fns = set()
-for i in range(len(df)):
-    if pd.notna(df.iloc[i, 0]):
-        # Extract filename from column A, lowercase
-        fn_a = str(df.iloc[i, 0]).split('/')[-1].lower()
-        Es = E_dict.get(fn_a, [])
-        Fs = F_dict.get(fn_a, [])
-        if Es or Fs:
-            df.iloc[i, 1] = ','.join(Es) if Es else None
-            df.iloc[i, 2] = ','.join(Fs) if Fs else None
-            used_fns.add(fn_a)
+https://smallurl.crm.com/48483838r83838383
 
-# Identify rows to highlight in column D
-highlight_rows = []
-for j in range(len(df)):
-    if pd.notna(df.iloc[j, 3]):
-        fn_d = str(df.iloc[j, 3]).split('/')[-1].lower()
-        if fn_d in used_fns:
-            highlight_rows.append(j)
+This behavior enables attackers to generate malicious links under the trusted crm.com domain and redirect victims to phishing or malware sites. Since the links use the company’s official domain, users may implicitly trust them, increasing the success rate of phishing campaigns.
 
-# Write the modified dataframe to the output Excel file
-df.to_excel('Result.xlsx', index=False, header=False, engine='openpyxl')
+Security impact:
 
-# Load the workbook to apply highlighting
-wb = openpyxl.load_workbook('Result.xlsx')
-ws = wb.active
-red_fill = openpyxl.styles.PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
-for row_idx in highlight_rows:
-    ws.cell(row=row_idx + 1, column=4).fill = red_fill
-wb.save('Result.xlsx')
+Phishing attacks can be carried out using the company’s domain.
+
+Brand/reputation damage if the domain is flagged for malicious use.
+
+Credential theft and fraud if employees or customers are misled into providing sensitive data.
+
+CVSS v4.0 Base Score: 7.3 (High) — Vector: CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:N/VI:N/VA:N/SC:H/SI:H/SA:N
+
+
+Recommendation:
+
+Enforce URL validation and restrict shortening to trusted/allowed domains.
+
+Block dangerous schemes (javascript:, data:, etc.).
+
+Require authentication or rate limiting for link creation.
+
+Provide interstitial warnings when redirecting to external sites.
+
+Monitor logs for abuse and implement a takedown process.
