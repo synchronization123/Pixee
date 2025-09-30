@@ -1,34 +1,68 @@
 import pandas as pd
 from collections import defaultdict
+import openpyxl
 
 # Read the input Excel file without headers
 df = pd.read_excel('data.xlsx', header=None)
 
-# Initialize dictionaries to hold lists of E and F for each filename (case-insensitive)
+# Convert columns B (1) and C (2) to object dtype to allow mixed types
+df[1] = df[1].astype(object)
+df[2] = df[2].astype(object)
+
+# Initialize dictionaries to hold lists of E and F for each key (parent/filename case-insensitive)
 E_dict = defaultdict(list)
 F_dict = defaultdict(list)
 
 # Iterate over rows to populate the dictionaries from columns D (3), E (4), F (5)
 for j in range(len(df)):
     if pd.notna(df.iloc[j, 3]):
-        # Extract filename from column D, lowercase
-        fn = str(df.iloc[j, 3]).split('/')[-1].lower()
-        E = df.iloc[j, 4]
-        F = df.iloc[j, 5]
-        if pd.notna(E):
-            E_dict[fn].append(str(E))
-        if pd.notna(F):
-            F_dict[fn].append(str(F))
+        parts = str(df.iloc[j, 3]).split('/')
+        if len(parts) > 1:
+            parent = parts[-2].lower()
+            fn = parts[-1].lower()
+            key = parent + '/' + fn
+            E = df.iloc[j, 4]
+            F = df.iloc[j, 5]
+            if pd.notna(E):
+                E_dict[key].append(str(E))
+            if pd.notna(F):
+                F_dict[key].append(str(F))
 
-# Now, for each row in column A (0), match filename and assign to B (1) and C (2)
+# Now, for each row in column A (0), match key and assign to B (1) and C (2)
+used_keys = set()
 for i in range(len(df)):
     if pd.notna(df.iloc[i, 0]):
-        # Extract filename from column A, lowercase
-        fn_a = str(df.iloc[i, 0]).split('/')[-1].lower()
-        Es = E_dict.get(fn_a, [])
-        Fs = F_dict.get(fn_a, [])
-        df.iloc[i, 1] = ','.join(Es) if Es else None
-        df.iloc[i, 2] = ','.join(Fs) if Fs else None
+        parts_a = str(df.iloc[i, 0]).split('/')
+        if len(parts_a) > 1:
+            parent_a = parts_a[-2].lower()
+            fn_a = parts_a[-1].lower()
+            key_a = parent_a + '/' + fn_a
+            Es = E_dict.get(key_a, [])
+            Fs = F_dict.get(key_a, [])
+            if Es or Fs:
+                df.iloc[i, 1] = ','.join(Es) if Es else None
+                df.iloc[i, 2] = ','.join(Fs) if Fs else None
+                used_keys.add(key_a)
+
+# Identify rows to highlight in column D
+highlight_rows = []
+for j in range(len(df)):
+    if pd.notna(df.iloc[j, 3]):
+        parts_d = str(df.iloc[j, 3]).split('/')
+        if len(parts_d) > 1:
+            parent_d = parts_d[-2].lower()
+            fn_d = parts_d[-1].lower()
+            key_d = parent_d + '/' + fn_d
+            if key_d in used_keys:
+                highlight_rows.append(j)
 
 # Write the modified dataframe to the output Excel file
-df.to_excel('Result.xlsx', index=False, header=False)
+df.to_excel('Result.xlsx', index=False, header=False, engine='openpyxl')
+
+# Load the workbook to apply highlighting
+wb = openpyxl.load_workbook('Result.xlsx')
+ws = wb.active
+red_fill = openpyxl.styles.PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+for row_idx in highlight_rows:
+    ws.cell(row=row_idx + 1, column=4).fill = red_fill
+wb.save('Result.xlsx')
