@@ -1,1 +1,34 @@
-..
+import pandas as pd
+from collections import defaultdict
+
+# Read the input Excel file without headers
+df = pd.read_excel('data.xlsx', header=None)
+
+# Initialize dictionaries to hold lists of E and F for each filename (case-insensitive)
+E_dict = defaultdict(list)
+F_dict = defaultdict(list)
+
+# Iterate over rows to populate the dictionaries from columns D (3), E (4), F (5)
+for j in range(len(df)):
+    if pd.notna(df.iloc[j, 3]):
+        # Extract filename from column D, lowercase
+        fn = str(df.iloc[j, 3]).split('/')[-1].lower()
+        E = df.iloc[j, 4]
+        F = df.iloc[j, 5]
+        if pd.notna(E):
+            E_dict[fn].append(str(E))
+        if pd.notna(F):
+            F_dict[fn].append(str(F))
+
+# Now, for each row in column A (0), match filename and assign to B (1) and C (2)
+for i in range(len(df)):
+    if pd.notna(df.iloc[i, 0]):
+        # Extract filename from column A, lowercase
+        fn_a = str(df.iloc[i, 0]).split('/')[-1].lower()
+        Es = E_dict.get(fn_a, [])
+        Fs = F_dict.get(fn_a, [])
+        df.iloc[i, 1] = ','.join(Es) if Es else None
+        df.iloc[i, 2] = ','.join(Fs) if Fs else None
+
+# Write the modified dataframe to the output Excel file
+df.to_excel('Result.xlsx', index=False, header=False)
