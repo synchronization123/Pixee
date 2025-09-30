@@ -1,1 +1,26 @@
-..
+Title:
+Unauthenticated URL Generation in SmallURL Service
+
+Description:
+The SmallURL application currently allows anyone to generate shortened links without requiring authentication. For example:
+
+https://smallurl.crm.com/newurl=https://google.com
+
+This request succeeds even when the user is not logged in, resulting in a valid shortened URL.
+
+Security impact:
+
+Attackers can mass-generate malicious short links using the company’s domain.
+
+Increases risk of phishing, spam, and reputation damage.
+
+No accountability since link creation is not tied to an authenticated user.
+
+
+Recommendation:
+
+Enforce authentication before allowing URL creation.
+
+Implement rate limiting to prevent automated abuse.
+
+Log creator details (user ID, IP) for audit and monitoring.
