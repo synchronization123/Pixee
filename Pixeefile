@@ -29,7 +29,6 @@ import time
 import threading
 import traceback
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import mimetypes
@@ -234,7 +233,6 @@ class DojoRestorer:
                         mapped = self.mapping_store[candidate].get(v)
                     if mapped is None and candidate in ("products", "users"):
                         # fallback not possible without backup name; caller should populate name_to_newid earlier
-                        # leave as-is if not found
                         mapped = self.mapping_store.get(candidate, {}).get(v)
                     out[k] = mapped if mapped is not None else v
                 elif k.lower() in ("product", "engagement", "test", "user", "owner"):
