@@ -1,0 +1,373 @@
+#!/usr/bin/env python3
+"""
+map_p_u_e_leads_products_with_mapped_json.py
+
+Maps Products, Users, Engagements (old -> new) using DefectDojo API.
+Engagements mapping sheet includes old/new lead & product.
+
+Enhancement:
+ - After mapping, create `engagements_mapped.json` by taking each old engagement
+   (from engagements.json), replacing its `id`, `lead`, and `product` with the
+   values from the corresponding new engagement (from engagements_new.json),
+   and saving the modified objects to engagements_mapped.json.
+
+Removes temporary unmatched sheets so final workbook contains:
+  - products_mappings
+  - users_mappings
+  - engagements_mappings
+
+Hardcoded API token is used.
+"""
+
+import os
+import sys
+import json
+import argparse
+from collections import defaultdict
+from copy import deepcopy
+
+import requests
+import pandas as pd
+from openpyxl import load_workbook
+
+# -----------------------
+# CONFIG (hardcoded token)
+# -----------------------
+API_BASE = "https://demo.defectdojo.org/api/v2"
+API_TOKEN = "token"
+
+PRODUCTS_ENDPOINT = f"{API_BASE}/products/"
+USERS_ENDPOINT = f"{API_BASE}/users/"
+ENGAGEMENTS_ENDPOINT = f"{API_BASE}/engagements/"
+
+OLD_PRODUCTS_FILE = "products.json"
+NEW_PRODUCTS_FILE = "products_new.json"
+OLD_USERS_FILE = "users.json"
+NEW_USERS_FILE = "users_new.json"
+OLD_ENG_FILE = "engagements.json"
+NEW_ENG_FILE = "engagements_new.json"
+
+OUTPUT_XLSX = "products_users_engagements_mappings.xlsx"
+ENGAGEMENTS_MAPPED_JSON = "engagements_mapped.json"
+
+# -----------------------
+# HELPERS
+# -----------------------
+def normalize_name(s):
+    if s is None:
+        return ""
+    return " ".join(str(s).strip().lower().split())
+
+def normalize_username(s):
+    if s is None:
+        return ""
+    return str(s).strip().lower()
+
+def load_json_file(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, dict) and "results" in data:
+        return data["results"]
+    if isinstance(data, list):
+        return data
+    raise ValueError(f"Unsupported JSON structure in {path}")
+
+def save_json(path, obj):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+
+def fetch_all(api_url, token, page_limit=100):
+    headers = {"Authorization": f"Token {token}", "Accept": "application/json"}
+    items = []
+    url = api_url if api_url.endswith("/") else api_url + "/"
+    params = {"limit": page_limit}
+    print(f"  -> Fetching: {url}")
+    while True:
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Failed to fetch {api_url}: {resp.status_code} - {resp.text}")
+        payload = resp.json()
+        if isinstance(payload, dict) and "results" in payload:
+            items.extend(payload["results"])
+            next_url = payload.get("next")
+            if not next_url:
+                break
+            url = next_url
+            params = None
+            print(f"     fetched {len(items)} so far...")
+        elif isinstance(payload, list):
+            items.extend(payload)
+            break
+        else:
+            break
+    print(f"     total fetched: {len(items)}")
+    return items
+
+def build_index(items, key_field, normalize_fn):
+    idx = defaultdict(list)
+    for it in items:
+        norm = normalize_fn(it.get(key_field))
+        idx[norm].append(it)
+    return idx
+
+# Engagement field extractors (OLD)
+def extract_lead_old(item):
+    if not item:
+        return ""
+    lead = item.get("lead") or item.get("engagement_lead")
+    if lead is None:
+        return ""
+    if isinstance(lead, dict):
+        return lead.get("username") or lead.get("email") or str(lead.get("id", "")) or ""
+    return str(lead)
+
+def extract_product_old(item):
+    if not item:
+        return ""
+    prod = item.get("product")
+    if prod is None:
+        return ""
+    if isinstance(prod, dict):
+        return prod.get("name") or str(prod.get("id", "")) or ""
+    return str(prod)
+
+# Engagement field extractors (NEW)
+def extract_lead_new(item):
+    if not item:
+        return ""
+    lead = item.get("lead") or item.get("engagement_lead")
+    if lead is None:
+        return ""
+    if isinstance(lead, dict):
+        return lead.get("username") or lead.get("email") or str(lead.get("id", "")) or ""
+    return str(lead)
+
+def extract_product_new(item):
+    if not item:
+        return ""
+    prod = item.get("product")
+    if prod is None:
+        return ""
+    if isinstance(prod, dict):
+        return prod.get("name") or str(prod.get("id", "")) or ""
+    return str(prod)
+
+def ensure_snapshot(file_path, endpoint, token, assume_fetch, resource_name):
+    if os.path.exists(file_path):
+        print(f"Loading old snapshot for {resource_name} from {file_path}")
+        items = load_json_file(file_path)
+        print(f"  loaded {len(items)} {resource_name}")
+        return items
+    print(f"Old snapshot {file_path} for {resource_name} not found.")
+    if assume_fetch:
+        print(f"  --assume-old-fetch: fetching {resource_name} and saving to {file_path}")
+        items = fetch_all(endpoint, token)
+        save_json(file_path, items)
+        print(f"  saved {len(items)} items to {file_path}")
+        return items
+    try:
+        resp = input(f"Do you want to fetch current {resource_name} now and use as the old snapshot? (y/n): ").strip().lower()
+    except KeyboardInterrupt:
+        print("\nAborted by user.")
+        sys.exit(1)
+    if resp not in ("y", "yes"):
+        print("No old snapshot available and user declined fetch. Aborting.")
+        sys.exit(1)
+    items = fetch_all(endpoint, token)
+    save_json(file_path, items)
+    print(f"Saved {len(items)} items to {file_path}")
+    return items
+
+# -----------------------
+# MAIN
+# -----------------------
+def main():
+    ap = argparse.ArgumentParser(description="Map Products, Users, Engagements old->new by name/username. Generate engagements_mapped.json.")
+    ap.add_argument("--assume-old-fetch", action="store_true",
+                    help="If old snapshots are missing, automatically fetch them and save (non-interactive).")
+    ap.add_argument("--out", default=OUTPUT_XLSX, help="Output Excel filename")
+    args = ap.parse_args()
+
+    print("==== START mapping run ====")
+
+    # PRODUCTS
+    print("\n[PRODUCTS] Ensure old snapshot")
+    old_products = ensure_snapshot(OLD_PRODUCTS_FILE, PRODUCTS_ENDPOINT, API_TOKEN, assume_fetch=args.assume_old_fetch, resource_name="products (old)")
+    print("[PRODUCTS] Fetch current/new products and save to", NEW_PRODUCTS_FILE)
+    new_products = fetch_all(PRODUCTS_ENDPOINT, API_TOKEN)
+    save_json(NEW_PRODUCTS_FILE, new_products)
+
+    # USERS
+    print("\n[USERS] Ensure old snapshot")
+    old_users = ensure_snapshot(OLD_USERS_FILE, USERS_ENDPOINT, API_TOKEN, assume_fetch=args.assume_old_fetch, resource_name="users (old)")
+    print("[USERS] Fetch current/new users and save to", NEW_USERS_FILE)
+    new_users = fetch_all(USERS_ENDPOINT, API_TOKEN)
+    save_json(NEW_USERS_FILE, new_users)
+
+    # ENGAGEMENTS
+    print("\n[ENGAGEMENTS] Ensure old snapshot")
+    old_engagements = ensure_snapshot(OLD_ENG_FILE, ENGAGEMENTS_ENDPOINT, API_TOKEN, assume_fetch=args.assume_old_fetch, resource_name="engagements (old)")
+    print("[ENGAGEMENTS] Fetch current/new engagements and save to", NEW_ENG_FILE)
+    new_engagements = fetch_all(ENGAGEMENTS_ENDPOINT, API_TOKEN)
+    save_json(NEW_ENG_FILE, new_engagements)
+
+    # Map products
+    print("\nMapping PRODUCTS by 'name'...")
+    prod_old_idx = build_index(old_products, "name", normalize_name)
+    prod_new_idx = build_index(new_products, "name", normalize_name)
+    prod_mappings = []
+    prod_un_old = []
+    prod_matched_new = set()
+    for norm, olds in prod_old_idx.items():
+        news = prod_new_idx.get(norm, [])
+        if not news:
+            prod_un_old.extend(olds)
+            continue
+        for o in olds:
+            for n in news:
+                prod_mappings.append({"old_id": o.get("id"), "new_id": n.get("id"), "name": o.get("name") or n.get("name")})
+        prod_matched_new.add(norm)
+
+    # Map users
+    print("\nMapping USERS by 'username'...")
+    user_old_idx = build_index(old_users, "username", normalize_username)
+    user_new_idx = build_index(new_users, "username", normalize_username)
+    user_mappings = []
+    user_un_old = []
+    user_matched_new = set()
+    for norm, olds in user_old_idx.items():
+        news = user_new_idx.get(norm, [])
+        if not news:
+            user_un_old.extend(olds)
+            continue
+        for o in olds:
+            for n in news:
+                user_mappings.append({"old_id": o.get("id"), "new_id": n.get("id"), "username": o.get("username") or n.get("username")})
+        user_matched_new.add(norm)
+
+    # Map engagements: produce rows with old display values and also new lead/product
+    print("\nMapping ENGAGEMENTS by 'name' (include lead_old/product_old and lead_new/product_new)...")
+    old_idx = build_index(old_engagements, "name", normalize_name)
+    new_idx = build_index(new_engagements, "name", normalize_name)
+
+    eng_mappings = []
+    eng_un_old = []
+    matched_new_keys = set()
+
+    for norm, old_list in old_idx.items():
+        new_list = new_idx.get(norm, [])
+        if not new_list:
+            eng_un_old.extend(old_list)
+            continue
+        for o in old_list:
+            name_old = o.get("name") or ""
+            lead_old = extract_lead_old(o)
+            product_old = extract_product_old(o)
+            for n in new_list:
+                lead_new = extract_lead_new(n)
+                product_new = extract_product_new(n)
+                eng_mappings.append({
+                    "old_id": o.get("id"),
+                    "new_id": n.get("id"),
+                    "name": name_old,
+                    "lead_old": lead_old,
+                    "product_old": product_old,
+                    "lead_new": lead_new,
+                    "product_new": product_new
+                })
+        matched_new_keys.add(norm)
+
+    eng_un_new = []
+    for norm, new_list in new_idx.items():
+        if norm not in matched_new_keys:
+            eng_un_new.extend(new_list)
+
+    # Write Excel (temporary unmatched sheets created then removed)
+    out_xlsx = args.out
+    print("\nWriting Excel:", out_xlsx)
+    with pd.ExcelWriter(out_xlsx, engine="openpyxl") as writer:
+        # products
+        pd.DataFrame(prod_mappings).to_excel(writer, sheet_name="products_mappings", index=False)
+        pd.DataFrame(prod_un_old).to_excel(writer, sheet_name="products_unmatched_old", index=False)
+        # users
+        pd.DataFrame(user_mappings).to_excel(writer, sheet_name="users_mappings", index=False)
+        pd.DataFrame(user_un_old).to_excel(writer, sheet_name="users_unmatched_old", index=False)
+        # engagements (ensure column order)
+        if eng_mappings:
+            df_eng = pd.DataFrame(eng_mappings)
+            cols = [c for c in ["old_id", "new_id", "name", "lead_old", "product_old", "lead_new", "product_new"] if c in df_eng.columns]
+            df_eng.to_excel(writer, sheet_name="engagements_mappings", index=False, columns=cols)
+        else:
+            pd.DataFrame([], columns=["old_id","new_id","name","lead_old","product_old","lead_new","product_new"]).to_excel(writer, sheet_name="engagements_mappings", index=False)
+        pd.DataFrame(eng_un_old).to_excel(writer, sheet_name="engagements_unmatched_old", index=False)
+        pd.DataFrame(eng_un_new).to_excel(writer, sheet_name="engagements_unmatched_new", index=False)
+
+    # Remove unmatched sheets
+    print("Removing unmatched sheets from Excel...")
+    wb = load_workbook(out_xlsx)
+    for sheet in [
+        "products_unmatched_old",
+        "users_unmatched_old",
+        "engagements_unmatched_old",
+        "engagements_unmatched_new"
+    ]:
+        if sheet in wb.sheetnames:
+            del wb[sheet]
+            print(f"  deleted sheet: {sheet}")
+    wb.save(out_xlsx)
+
+    # -----------------------
+    # NEW: generate engagements_mapped.json
+    # -----------------------
+    print("\nGenerating engagements_mapped.json by replacing id/lead/product on OLD objects with NEW values...")
+    # build lookup of old engagements by id
+    old_by_id = { e.get("id"): e for e in old_engagements }
+    # build lookup of new engagements by id (full object)
+    new_by_id = { e.get("id"): e for e in new_engagements }
+
+    engagements_mapped = []
+    for row in eng_mappings:
+        old_id = row.get("old_id")
+        new_id = row.get("new_id")
+        old_obj = deepcopy(old_by_id.get(old_id)) if old_id in old_by_id else None
+        new_obj = new_by_id.get(new_id)
+
+        if old_obj is None:
+            # fallback: try to find old object by name if id missing (less reliable)
+            # find first old with matching name
+            candidates = [o for o in old_engagements if normalize_name(o.get("name")) == normalize_name(row.get("name"))]
+            old_obj = deepcopy(candidates[0]) if candidates else None
+
+        if old_obj is None:
+            print(f"  warn: could not locate OLD engagement for old_id={old_id} (skipping)")
+            continue
+
+        # Replace id with new_id
+        old_obj["id"] = new_id
+
+        # Replace lead: prefer raw object from new engagement if present, else fallback to text
+        if new_obj and "lead" in new_obj:
+            old_obj["lead"] = deepcopy(new_obj["lead"])
+        else:
+            # fallback to text (lead_new)
+            if "lead_new" in row:
+                old_obj["lead"] = row.get("lead_new")
+
+        # Replace product: prefer raw object from new engagement if present, else fallback to text
+        if new_obj and "product" in new_obj:
+            old_obj["product"] = deepcopy(new_obj["product"])
+        else:
+            if "product_new" in row:
+                old_obj["product"] = row.get("product_new")
+
+        engagements_mapped.append(old_obj)
+
+    # save mapped JSON
+    save_json(ENGAGEMENTS_MAPPED_JSON, engagements_mapped)
+    print(f"Saved {len(engagements_mapped)} mapped engagements to {ENGAGEMENTS_MAPPED_JSON}")
+
+    print("\n✅ Completed. Final Excel:", out_xlsx)
+    print(f"Products mapped: {len(prod_mappings)} | Users mapped: {len(user_mappings)} | Engagements mapped: {len(eng_mappings)}")
+
+if __name__ == "__main__":
+    main()
