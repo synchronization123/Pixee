@@ -1,610 +1,122 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-dojo_restore_hardcoded.py
+Project Name: Approved Listing Framework Verification and Audit on Production
+Project Manager: [Your Name]
+Start Date: December 2024
+Target End Date: 10 October 2025
+Version: 1.0
 
-A self-contained DefectDojo restore script with hardcoded configuration
-(suitable for running in a trusted, single-environment setup).
 
-Features:
- - Hardcoded BASE_URL, TOKEN, BACKUP_DIR, MAPPINGS_FILE
- - Steps in exact sequence:
-     1) products -> new_products.json
-     2) users -> new_users.json
-     3) engagements -> new_engagements.json (remapped using product/user mappings)
-     4) tests -> new_tests.json (remapped, attachments uploaded)
-     5) findings -> new_findings.json (remapped, attachments uploaded)
- - Seeds mapping_store from existing dd_id_mappings.json if present
- - Persists updated dd_id_mappings.json at the end
- - Uses resource-specific files endpoints for tests/findings/engagements and falls back to /api/v2/documents/
- - Retry/backoff and configurable concurrency
- - Logging to console and to hardcoded logfile under backup dir
+---
 
-IMPORTANT:
- - This file contains an API token hardcoded for convenience per your request.
- - Run only in a secure environment where it is safe to store the token in plain text.
+1. Purpose
 
-Author: Assistant
-Date: 2025-10-04
-"""
+The purpose of this project is to verify and audit all production applications listed under the Approved Listing Framework to ensure compliance with established security configurations and operational controls. This initiative aims to confirm that applications in production environments are securely configured and operating as per organizational standards.
 
-from __future__ import annotations
-import os
-import sys
-import json
-import time
-import threading
-import traceback
-from typing import Any, Dict, List, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import requests
-import mimetypes
 
-# ---------------- HARDCODED CONFIGURATION ----------------
-BASE_URL = "https://demo.defectdojo.org"  # DefectDojo base URL
-TOKEN = "jsjsjdjnjdjd"  # Hardcoded API token (from user)
-BACKUP_DIR = r"C:\Users\Admin\Desktop\Project87\Project-3\backup"  # Hardcoded backup directory
-MAPPINGS_FILE = os.path.join(BACKUP_DIR, "dd_id_mappings.json")  # Optional seed mapping file
+---
 
-# Behavior configuration (tweak here if desired)
-CONCURRENCY = 4           # parallel create workers for products/users
-MAX_RETRIES = 3           # retries per HTTP request
-BACKOFF_FACTOR = 0.5      # base seconds for exponential backoff
-LOGFILE = os.path.join(BACKUP_DIR, "dojo_restore_log.txt")  # logfile path
-VERBOSE = True            # print progress to console
+2. Objectives
 
-# ---------------- Endpoints & constants ----------------
-RESOURCE_ENDPOINTS = {
-    "products": "/api/v2/products/",
-    "users": "/api/v2/users/",
-    "engagements": "/api/v2/engagements/",
-    "tests": "/api/v2/tests/",
-    "findings": "/api/v2/findings/",
-}
+Conduct production-level verification and audit of all applications listed under the Approved Listing Framework.
 
-FILES_ENDPOINTS = {
-    "engagements_files": "/api/v2/engagements/{id}/files/",
-    "engagements_files_download": "/api/v2/engagements/{id}/files/download/{file_id}/",
-    "tests_files": "/api/v2/tests/{id}/files/",
-    "tests_files_download": "/api/v2/tests/{id}/files/download/{file_id}/",
-    "findings_files": "/api/v2/findings/{id}/files/",
-    "findings_files_download": "/api/v2/findings/{id}/files/download/{file_id}/",
-}
+Validate compliance with required security parameters such as block mode enforcement and central defense configurations.
 
-DOCUMENTS_ENDPOINT = "/api/v2/documents/"
+Identify and revalidate applications that could not be verified initially.
 
-SERVER_FIELDS_TO_STRIP = {"id", "created", "updated", "date", "last_modified", "active", "deleted", "url", "uuid"}
+Provide remediation recommendations for failed or non-compliant applications.
 
-# ---------------- Utilities ----------------
-def now_ts() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S")
+Deliver a consolidated audit summary report for management review.
 
-def strip_server_fields(obj: Any) -> Any:
-    """Remove server-managed fields recursively."""
-    if isinstance(obj, dict):
-        out = {}
-        for k, v in obj.items():
-            if k.lower() in SERVER_FIELDS_TO_STRIP:
-                continue
-            out[k] = strip_server_fields(v)
-        return out
-    if isinstance(obj, list):
-        return [strip_server_fields(i) for i in obj]
-    return obj
 
-def guess_mime(fname: str) -> str:
-    return mimetypes.guess_type(fname)[0] or "application/octet-stream"
 
-def log_write(line: str):
-    """Append a single line to logfile (best-effort)."""
-    try:
-        os.makedirs(os.path.dirname(LOGFILE), exist_ok=True)
-        with open(LOGFILE, "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-    except Exception:
-        pass
+---
 
-def log(*parts):
-    line = f"[{now_ts()}] " + " ".join(str(p) for p in parts)
-    if VERBOSE:
-        print(line)
-    log_write(line)
+3. Scope of Work
 
-# Exponential backoff HTTP wrapper
-def retry_request(session: requests.Session, method: str, url: str, headers: Optional[Dict[str,str]] = None,
-                  json_payload: Optional[Any] = None, data: Optional[Dict[str,str]] = None,
-                  files: Optional[Dict[str,Tuple[str,Any,str]]] = None,
-                  timeout: int = 60, max_retries: int = MAX_RETRIES, backoff_factor: float = BACKOFF_FACTOR) -> requests.Response:
-    attempt = 0
-    last_exc = None
-    while attempt <= max_retries:
-        try:
-            if method.lower() == "get":
-                r = session.get(url, headers=headers, timeout=timeout)
-            elif method.lower() == "post":
-                if files is not None:
-                    r = session.post(url, headers=headers, files=files, data=data, timeout=timeout)
-                elif json_payload is not None:
-                    r = session.post(url, headers=headers, json=json_payload, timeout=timeout)
-                else:
-                    r = session.post(url, headers=headers, data=data, timeout=timeout)
-            elif method.lower() == "put":
-                if json_payload is not None:
-                    r = session.put(url, headers=headers, json=json_payload, timeout=timeout)
-                else:
-                    r = session.put(url, headers=headers, data=data, timeout=timeout)
-            else:
-                raise ValueError("Unsupported HTTP method: " + method)
-            return r
-        except Exception as e:
-            last_exc = e
-            wait = backoff_factor * (2 ** attempt)
-            log(f"HTTP exception on attempt {attempt} for {method} {url}: {e} — sleeping {wait:.2f}s then retrying")
-            time.sleep(wait)
-            attempt += 1
-    log(f"Retry attempts exhausted for {method} {url}")
-    raise last_exc
+In-Scope
 
-# ---------------- Core Restorer Class ----------------
-class DojoRestorer:
-    def __init__(self):
-        self.base_url = BASE_URL.rstrip("/")
-        self.token = TOKEN
-        self.backup_dir = os.path.abspath(BACKUP_DIR)
-        self.session = requests.Session()
-        self.session.headers.update({"Authorization": f"Token {self.token}", "Accept": "application/json"})
-        self.lock = threading.Lock()
-        # mapping_store[resource][old_id] = new_id
-        self.mapping_store: Dict[str, Dict[int, Optional[int]]] = {k: {} for k in RESOURCE_ENDPOINTS.keys()}
-        # name->newid for products/users
-        self.name_to_newid: Dict[str, Dict[str, int]] = {"products": {}, "users": {}}
-        self.concurrency = CONCURRENCY
-        self.max_retries = MAX_RETRIES
-        self.backoff_factor = BACKOFF_FACTOR
+Audit of 88 applications as provided by Dan.
 
-    def load_mappings_if_present(self):
-        if os.path.isfile(MAPPINGS_FILE):
-            try:
-                with open(MAPPINGS_FILE, "r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-                ms = data.get("mapping_store") or data.get("mappings") or {}
-                for res, d in ms.items():
-                    if res in self.mapping_store and isinstance(d, dict):
-                        for oldk, newv in d.items():
-                            try:
-                                oldi = int(oldk)
-                            except Exception:
-                                continue
-                            self.mapping_store[res][oldi] = int(newv) if isinstance(newv, int) else newv
-                nt = data.get("name_to_newid") or {}
-                for res, d in nt.items():
-                    if isinstance(d, dict):
-                        for name, nid in d.items():
-                            try:
-                                self.name_to_newid.setdefault(res, {})[str(name)] = int(nid)
-                            except Exception:
-                                continue
-                log(f"Loaded existing mappings from {MAPPINGS_FILE}")
-            except Exception as e:
-                log("Failed to load mappings file:", e)
-        else:
-            log(f"No existing mappings file found at {MAPPINGS_FILE}; starting fresh.")
+Verification of production configurations against approved framework controls.
 
-    def persist_mappings(self):
-        out = {"mapping_store": self.mapping_store, "name_to_newid": self.name_to_newid}
-        try:
-            os.makedirs(self.backup_dir, exist_ok=True)
-            with open(MAPPINGS_FILE, "w", encoding="utf-8") as fh:
-                json.dump(out, fh, indent=2, ensure_ascii=False)
-            log(f"Persisted mappings to {MAPPINGS_FILE}")
-        except Exception as e:
-            log("Failed to persist mappings:", e)
+Revalidation of applications where verification was not completed due to access or environment limitations.
 
-    def _load_json_list(self, fname: str) -> List[Dict[str,Any]]:
-        path = os.path.join(self.backup_dir, fname)
-        if not os.path.isfile(path):
-            log(f"Warning: {fname} not found in backup dir {self.backup_dir}; returning []")
-            return []
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            if isinstance(data, list):
-                return data
-            if isinstance(data, dict):
-                return [data]
-            return []
-        except Exception as e:
-            log(f"Failed to read {path}: {e}")
-            return []
+Tracking and reporting of application audit results.
 
-    def _write_json(self, fname: str, data: List[Dict[str,Any]]):
-        path = os.path.join(self.backup_dir, fname)
-        try:
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump(data, fh, indent=2, ensure_ascii=False)
-            log(f"Wrote {len(data)} objects to {path}")
-        except Exception as e:
-            log(f"Failed to write {path}: {e}")
 
-    # ---------------- Remapping ----------------
-    def remap_object_refs(self, obj: Any) -> Any:
-        """Recursively remap fk references from old ids to new ids using mapping_store."""
-        if isinstance(obj, dict):
-            out = {}
-            for k, v in obj.items():
-                if k.endswith("_id") and isinstance(v, int):
-                    prefix = k[:-3].lower()
-                    candidate = prefix + "s" if prefix + "s" in self.mapping_store else prefix
-                    mapped = None
-                    if candidate in self.mapping_store:
-                        mapped = self.mapping_store[candidate].get(v)
-                    out[k] = mapped if mapped is not None else v
-                elif k.lower() in ("product", "engagement", "test", "user", "owner"):
-                    if isinstance(v, int):
-                        candidate = None
-                        if k.lower() in ("user", "owner"):
-                            candidate = "users"
-                        elif k.lower() == "product":
-                            candidate = "products"
-                        elif k.lower() == "engagement":
-                            candidate = "engagements"
-                        elif k.lower() == "test":
-                            candidate = "tests"
-                        mapped = None
-                        if candidate:
-                            mapped = self.mapping_store.get(candidate, {}).get(v)
-                        out[k] = mapped if mapped is not None else v
-                    elif isinstance(v, dict) and "id" in v and isinstance(v["id"], int):
-                        inner = v.copy()
-                        old = inner["id"]
-                        candidate = None
-                        if k.lower() in ("user", "owner"):
-                            candidate = "users"
-                        elif k.lower() == "product":
-                            candidate = "products"
-                        elif k.lower() == "engagement":
-                            candidate = "engagements"
-                        elif k.lower() == "test":
-                            candidate = "tests"
-                        if candidate:
-                            mapped = self.mapping_store.get(candidate, {}).get(old)
-                            if mapped is not None:
-                                inner["id"] = mapped
-                        out[k] = self.remap_object_refs(inner)
-                    else:
-                        out[k] = self.remap_object_refs(v)
-                else:
-                    out[k] = self.remap_object_refs(v)
-            return out
-        elif isinstance(obj, list):
-            return [self.remap_object_refs(i) for i in obj]
-        else:
-            return obj
+Out-of-Scope
 
-    # ---------------- Create helpers ----------------
-    def _create_objects_concurrent(self, resource: str, objects: List[Dict[str,Any]]) -> List[Dict[str,Any]]:
-        if not objects:
-            return []
-        url = self.base_url + RESOURCE_ENDPOINTS[resource]
-        created = []
-        log(f"Creating {len(objects)} {resource} (concurrency={self.concurrency})")
-        def worker(obj):
-            old_id = obj.get("id")
-            payload = strip_server_fields(obj)
-            try:
-                r = retry_request(self.session, "post", url, headers=None, json_payload=payload,
-                                  max_retries=self.max_retries, backoff_factor=self.backoff_factor)
-                if r is not None and r.status_code in (200,201):
-                    try:
-                        j = r.json()
-                    except Exception:
-                        j = {}
-                    new_id = j.get("id")
-                    with self.lock:
-                        if old_id is not None:
-                            self.mapping_store[resource][int(old_id)] = int(new_id) if new_id is not None else None
-                        if resource == "products":
-                            name = j.get("name") or payload.get("name")
-                            if name and new_id:
-                                self.name_to_newid.setdefault("products", {})[str(name)] = int(new_id)
-                        if resource == "users":
-                            username = j.get("username") or payload.get("username")
-                            if username and new_id:
-                                self.name_to_newid.setdefault("users", {})[str(username)] = int(new_id)
-                    log(f"Created {resource[:-1]} old_id={old_id} -> new_id={new_id}")
-                    return j
-                else:
-                    log(f"Failed to create {resource[:-1]} old_id={old_id}: status={getattr(r,'status_code',None)}")
-                    return {"__failed__": True, "old_id": old_id, "status": getattr(r,'status_code',None)}
-            except Exception as e:
-                log(f"Exception creating {resource[:-1]} old_id={old_id}: {e}")
-                return {"__failed__": True, "old_id": old_id, "exception": str(e)}
+Implementation of remediations or patch deployments.
 
-        results = []
-        if self.concurrency > 1:
-            with ThreadPoolExecutor(max_workers=self.concurrency) as exe:
-                futures = {exe.submit(worker, obj): obj for obj in objects}
-                for fut in as_completed(futures):
-                    try:
-                        results.append(fut.result())
-                    except Exception as e:
-                        log("Worker future raised exception:", e)
-        else:
-            for obj in objects:
-                results.append(worker(obj))
-        created = [r for r in results if isinstance(r, dict) and not r.get("__failed__")]
-        return created
+Audits of non-production or decommissioned applications.
 
-    # ---------------- Step 1: products ----------------
-    def create_products(self):
-        prods = self._load_json_list("products.json")
-        if not prods:
-            log("No products.json found or empty.")
-            return []
-        created = self._create_objects_concurrent("products", prods)
-        self._write_json("new_products.json", created)
-        self.persist_mappings()
-        return created
+Architectural redesigns or major configuration changes.
 
-    # ---------------- Step 2: users ----------------
-    def create_users(self):
-        users = self._load_json_list("users.json")
-        if not users:
-            log("No users.json found or empty.")
-            return []
-        created = self._create_objects_concurrent("users", users)
-        self._write_json("new_users.json", created)
-        self.persist_mappings()
-        return created
 
-    # ---------------- Step 3: engagements ----------------
-    def create_engagements(self):
-        engs = self._load_json_list("engagements.json")
-        if not engs:
-            log("No engagements.json found or empty.")
-            return []
-        url = self.base_url + RESOURCE_ENDPOINTS["engagements"]
-        created = []
-        log(f"Creating {len(engs)} engagements sequentially (preserve mapping).")
-        for obj in engs:
-            old_id = obj.get("id")
-            payload = strip_server_fields(obj)
-            payload = self.remap_object_refs(payload)
-            try:
-                r = retry_request(self.session, "post", url, headers=None, json_payload=payload,
-                                  max_retries=self.max_retries, backoff_factor=self.backoff_factor)
-                if r is not None and r.status_code in (200,201):
-                    try:
-                        j = r.json()
-                    except Exception:
-                        j = {}
-                    new_id = j.get("id")
-                    with self.lock:
-                        if old_id is not None:
-                            self.mapping_store["engagements"][int(old_id)] = int(new_id) if new_id is not None else None
-                    created.append(j)
-                    log(f"Created engagement old_id={old_id} -> new_id={new_id}")
-                else:
-                    log(f"Failed to create engagement old_id={old_id}: status={getattr(r,'status_code',None)}")
-            except Exception as e:
-                log(f"Exception creating engagement old_id={old_id}: {e}")
-        self._write_json("new_engagements.json", created)
-        self.persist_mappings()
-        return created
 
-    # ---------------- Upload helper (resource-specific then documents fallback) ----------------
-    def _upload_file_to_resource(self, resource: str, target_id: int, file_path: str) -> Tuple[str, Optional[int], str]:
-        fname = os.path.basename(file_path)
-        # try resource-specific endpoint
-        ep_key = None
-        if resource == "tests":
-            ep_key = "tests_files"
-        elif resource == "findings":
-            ep_key = "findings_files"
-        elif resource == "engagements":
-            ep_key = "engagements_files"
-        if ep_key and ep_key in FILES_ENDPOINTS:
-            url = self.base_url + FILES_ENDPOINTS[ep_key].format(id=target_id)
-            headers = {"Authorization": f"Token {self.token}"}
-            try:
-                with open(file_path, "rb") as fh:
-                    files = {"file": (fname, fh, guess_mime(fname))}
-                    r = retry_request(self.session, "post", url, headers=headers, files=files, data={"title": fname},
-                                      max_retries=self.max_retries, backoff_factor=self.backoff_factor)
-                status = getattr(r, "status_code", None)
-                body = getattr(r, "text", "")[:1000]
-                if status in (200,201):
-                    log(f"Uploaded '{fname}' to {resource} id={target_id} via files endpoint (status {status})")
-                    return (fname, status, body)
-                log(f"Files endpoint returned {status} for {fname}; will attempt documents fallback")
-            except Exception as e:
-                log(f"Exception uploading to files endpoint for {resource} id={target_id}: {e}; will fallback to documents")
+---
 
-        # fallback to documents endpoint
-        try:
-            url = self.base_url + DOCUMENTS_ENDPOINT
-            headers = {"Authorization": f"Token {self.token}"}
-            with open(file_path, "rb") as fh:
-                files = {"file": (fname, fh, guess_mime(fname))}
-                data = {"title": fname}
-                if resource == "tests":
-                    data["test"] = str(target_id)
-                elif resource == "findings":
-                    data["finding"] = str(target_id)
-                elif resource == "engagements":
-                    data["engagement"] = str(target_id)
-                r = retry_request(self.session, "post", url, headers=headers, files=files, data=data,
-                                  max_retries=self.max_retries, backoff_factor=self.backoff_factor)
-            status = getattr(r, "status_code", None)
-            body = getattr(r, "text", "")[:1000]
-            if status in (200,201):
-                log(f"Uploaded '{fname}' to documents and attached to {resource} id={target_id} (status {status})")
-            else:
-                log(f"Documents endpoint returned {status} for {fname}")
-            return (fname, status, body)
-        except Exception as e:
-            log(f"Exception uploading '{fname}' to documents endpoint: {e}")
-            return (fname, None, str(e))
+4. Deliverables
 
-    # ---------------- Step 4: tests ----------------
-    def create_tests(self):
-        tests = self._load_json_list("tests.json")
-        if not tests:
-            log("No tests.json found or empty.")
-            return []
-        url = self.base_url + RESOURCE_ENDPOINTS["tests"]
-        created = []
-        log(f"Creating {len(tests)} tests sequentially and uploading attachments.")
-        for obj in tests:
-            old_id = obj.get("id")
-            payload = strip_server_fields(obj)
-            payload = self.remap_object_refs(payload)
-            try:
-                r = retry_request(self.session, "post", url, headers=None, json_payload=payload,
-                                  max_retries=self.max_retries, backoff_factor=self.backoff_factor)
-                if r is not None and r.status_code in (200,201):
-                    try:
-                        j = r.json()
-                    except Exception:
-                        j = {}
-                    new_id = j.get("id")
-                    with self.lock:
-                        if old_id is not None:
-                            self.mapping_store["tests"][int(old_id)] = int(new_id) if new_id is not None else None
-                    log(f"Created test old_id={old_id} -> new_id={new_id}")
-                    # attachments folder: backup_dir/documents/tests/<old_id>/*
-                    docs_folder = os.path.join(self.backup_dir, "documents", "tests", str(old_id))
-                    if os.path.isdir(docs_folder):
-                        files = [os.path.join(docs_folder, f) for f in os.listdir(docs_folder) if os.path.isfile(os.path.join(docs_folder, f))]
-                        log(f"Found {len(files)} attachments for test old_id={old_id}; uploading...")
-                        for fpath in files:
-                            fname, status, resp = self._upload_file_to_resource("tests", new_id, fpath)
-                            log(f"  uploaded {fname}: status={status}")
-                    else:
-                        log(f"No attachments folder for test old_id={old_id} at {docs_folder}")
-                    created.append(j)
-                else:
-                    log(f"Failed to create test old_id={old_id}: status={getattr(r,'status_code',None)}")
-            except Exception as e:
-                log(f"Exception creating test old_id={old_id}: {e}")
-        self._write_json("new_tests.json", created)
-        self.persist_mappings()
-        return created
+Completed audit reports for all 88 applications.
 
-    # ---------------- Step 5: findings ----------------
-    def create_findings(self):
-        findings = self._load_json_list("findings.json")
-        if not findings:
-            log("No findings.json found or empty.")
-            return []
-        url = self.base_url + RESOURCE_ENDPOINTS["findings"]
-        created = []
-        log(f"Creating {len(findings)} findings sequentially and uploading attachments.")
-        for obj in findings:
-            old_id = obj.get("id")
-            payload = strip_server_fields(obj)
-            payload = self.remap_object_refs(payload)
-            try:
-                r = retry_request(self.session, "post", url, headers=None, json_payload=payload,
-                                  max_retries=self.max_retries, backoff_factor=self.backoff_factor)
-                if r is not None and r.status_code in (200,201):
-                    try:
-                        j = r.json()
-                    except Exception:
-                        j = {}
-                    new_id = j.get("id")
-                    with self.lock:
-                        if old_id is not None:
-                            self.mapping_store["findings"][int(old_id)] = int(new_id) if new_id is not None else None
-                    log(f"Created finding old_id={old_id} -> new_id={new_id}")
-                    # attachments folder: backup_dir/documents/findings/<old_id>/*
-                    docs_folder = os.path.join(self.backup_dir, "documents", "findings", str(old_id))
-                    if os.path.isdir(docs_folder):
-                        files = [os.path.join(docs_folder, f) for f in os.listdir(docs_folder) if os.path.isfile(os.path.join(docs_folder, f))]
-                        log(f"Found {len(files)} attachments for finding old_id={old_id}; uploading...")
-                        for fpath in files:
-                            fname, status, resp = self._upload_file_to_resource("findings", new_id, fpath)
-                            log(f"  uploaded {fname}: status={status}")
-                    else:
-                        log(f"No attachments folder for finding old_id={old_id} at {docs_folder}")
-                    created.append(j)
-                else:
-                    log(f"Failed to create finding old_id={old_id}: status={getattr(r,'status_code',None)}")
-            except Exception as e:
-                log(f"Exception creating finding old_id={old_id}: {e}")
-        self._write_json("new_findings.json", created)
-        self.persist_mappings()
-        return created
+Revalidation reports for 6 applications requiring additional review.
 
-    # ---------------- Convenience wrappers for earlier methods ----------------
-    def _load_json_list(self, fname: str) -> List[Dict[str,Any]]:
-        return self._load_json_list_helper(fname)
+Consolidated compliance summary including block mode, central defense, and failure analysis.
 
-    def _load_json_list_helper(self, fname: str) -> List[Dict[str,Any]]:
-        path = os.path.join(self.backup_dir, fname)
-        if not os.path.isfile(path):
-            return []
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            if isinstance(data, list):
-                return data
-            if isinstance(data, dict):
-                return [data]
-            return []
-        except Exception as e:
-            log(f"Failed reading {path}: {e}")
-            return []
+Final summary report with recommendations and closure status.
 
-    def _write_json(self, fname: str, data: List[Dict[str,Any]]):
-        path = os.path.join(self.backup_dir, fname)
-        try:
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump(data, fh, indent=2, ensure_ascii=False)
-            log(f"Wrote {len(data)} objects to {path}")
-        except Exception as e:
-            log(f"Failed to write {path}: {e}")
 
-# ---------------- Main automatic execution ----------------
-def main():
-    log("Starting hardcoded DefectDojo restore run.")
-    restorer = DojoRestorer()
-    # Load seed mappings if present
-    restorer.load_mappings_if_present()
 
-    try:
-        # Step 1: products
-        log("=== STEP 1: Products ===")
-        prods = restorer.create_products()
-        log(f"Step 1 complete: created {len(prods)} products (new_products.json).")
+---
 
-        # Step 2: users
-        log("=== STEP 2: Users ===")
-        users = restorer.create_users()
-        log(f"Step 2 complete: created {len(users)} users (new_users.json).")
+5. Assumptions
 
-        # Step 3: engagements
-        log("=== STEP 3: Engagements ===")
-        engagements = restorer.create_engagements()
-        log(f"Step 3 complete: created {len(engagements)} engagements (new_engagements.json).")
+Application owners will provide timely access to production environments.
 
-        # Step 4: tests (with attachments)
-        log("=== STEP 4: Tests ===")
-        tests = restorer.create_tests()
-        log(f"Step 4 complete: created {len(tests)} tests (new_tests.json).")
+Necessary audit tools and scripts are available and approved for production use.
 
-        # Step 5: findings (with attachments)
-        log("=== STEP 5: Findings ===")
-        findings = restorer.create_findings()
-        log(f"Step 5 complete: created {len(findings)} findings (new_findings.json).")
+The data provided by Dan is accurate and complete.
 
-        # Finalize mappings
-        restorer.persist_mappings()
-        log("Restore run finished successfully.")
-    except Exception as e:
-        log("Fatal error during restore:", e)
-        log(traceback.format_exc())
-        sys.exit(1)
 
-if __name__ == "__main__":
-    main()
+
+---
+
+6. Constraints
+
+Verification in production is dependent on access approvals and environment stability.
+
+Two applications currently have blockers preventing completion of the audit.
+
+Patch creation for one application is still in progress, which may impact closure.
+
+
+
+---
+
+7. Current Status Summary
+
+Status Category	Count	Remarks
+
+Block Mode Enabled	72	Verified successfully
+Central Defense In Place	6	Verified successfully
+Pending (Patch in Progress)	1	Awaiting patch completion
+Failed	4	Requires remediation
+Not Applicable (N/A)	1	Excluded based on framework criteria
+Pending (Under Audit)	1	Audit in progress, currently being verified
+Total Applications	88	
+
+
+
+---
+
+8. Timeline (High-Level)
+
+Dec 2024 – Mar 2025: Application identification and initial audit kick-off.
+
+Apr – Aug 2025: Verification of 88 applications and issue tracking.
+
+Sep 2025: Revalidation of 6 pending applications.
+
+Oct 2025: Closure of remaining 2 blocked applications and final report submission.
+
+
