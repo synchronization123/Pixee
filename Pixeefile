@@ -1,1 +1,77 @@
-..
+Title:
+User registration endpoint allows continuous OTP email sending by bypassing UI restriction
+
+Description:
+During user registration, the “Resend OTP” functionality is intended to be disabled for 10 minutes after an OTP is sent. However, this restriction is enforced only at the UI level. By inspecting and modifying the frontend code using browser developer tools, an attacker can remove the disabled attribute from the “Resend OTP” button and repeatedly trigger the OTP endpoint.
+
+This allows an attacker to continuously send OTP emails to any targeted email address, resulting in potential email flooding or abuse of the application’s mail infrastructure.
+
+
+---
+
+Steps to Reproduce:
+
+1. Navigate to the user registration page.
+
+
+2. Enter a valid email and click “Send OTP.”
+
+
+3. Observe that the “Resend OTP” button is disabled for 10 minutes.
+
+
+4. Open Developer Tools → Elements tab in the browser.
+
+
+5. Remove the disabled attribute from the “Resend OTP” button.
+
+
+6. Click “Resend OTP” repeatedly.
+
+
+7. Multiple OTP emails are sent to the same address without restriction.
+
+
+
+
+---
+
+Expected Result:
+The OTP resend functionality should be rate-limited and enforced at the server-side, ensuring users cannot trigger multiple OTP emails within a specified cooldown period, regardless of UI manipulations.
+
+Actual Result:
+The cooldown is only implemented on the client side (frontend), allowing attackers to bypass it easily and repeatedly trigger OTP emails.
+
+
+---
+
+Impact:
+
+Enables email flooding and potential denial of service to targeted accounts.
+
+Causes unnecessary load on the mail server and infrastructure.
+
+Violates security best practices by relying solely on client-side enforcement.
+
+
+
+---
+
+Severity: Medium
+CVSS v4.0 Vector (Suggested):
+CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:L/VA:L/SC:N/SI:N/SA:N
+
+
+---
+
+Remediation Recommendations:
+
+Enforce OTP resend rate limiting on the backend/API level.
+
+Implement a server-side cooldown timer that rejects OTP resend requests before the defined time window (e.g., 10 minutes).
+
+Track OTP requests per user or per IP to prevent abuse.
+
+Log repeated OTP requests for monitoring and alerting.
+
+Validate UI messages against backend logic to maintain consistency.
