@@ -1,141 +1,124 @@
 #!/usr/bin/env python3
 """
-Update Jira statuses into column B of jira.xlsx (first sheet).
-
-- Column A: Jira issue keys (e.g., ABC-123)
-- Column B: Will be overwritten with the current Status name for each key
-- Preserves the rest of the workbook (uses openpyxl to edit only col B)
-
-Auth:
-- If you're on Jira Cloud, set EMAIL to your Atlassian account email and TOKEN to your API token.
-  The script will use HTTP Basic Auth (email + token).
-- If you're on Jira Data Center/Server with a Personal Access Token (PAT), leave EMAIL=None.
-  The script will use Bearer <TOKEN>.
-
-Edit BASE_URL, TOKEN, EMAIL below before running.
+Reads Jira keys from column A of jira.xlsx (first sheet) and writes Status into column B.
+Forces Jira Server/DC endpoint: /rest/api/2
+Auth: Bearer <TOKEN> (Personal Access Token). If you actually need Basic, see comment below.
 """
 
-import sys
-import time
-from typing import Optional
-
-import requests
-from requests.adapters import HTTPAdapter
-from requests.auth import HTTPBasicAuth
-from urllib3.util.retry import Retry
+import sys, time, requests
 from openpyxl import load_workbook
 
-# ================== CONFIG: EDIT THESE ==================
-BASE_URL = "https://jiira.xrm.com"     # <- normalized from your "Https;//jiira.xrm.com"
-TOKEN    = "sjiejdjdjdudjd"            # <- your token
-EMAIL    = None                        # <- set to your email for Jira Cloud, or leave None for Bearer token
-SHEET_NAME = None                      # <- None = first worksheet; or put exact sheet name
-# ========================================================
+# ---------- CONFIG ----------
+BASE_URL = "https://jiira.xrm.com"   # your host (typo fixed below)
+TOKEN    = "sjiejdjdjdudjd"          # your PAT
+SHEET_NAME = None                    # None = first worksheet
+ADD_STATUS_HEADER = False            # set True if row 1 is headers and you want "Status" in B1
+VERIFY_SSL = True                    # set False only if your Jira uses self-signed certs
+# If you need Basic auth instead of PAT:
+# BASIC_USER = "your-username"; BASIC_PASS = "your-password"
+# ----------------------------
 
 def normalize_base(url: str) -> str:
-    url = url.strip()
-    url = url.replace(";", ":")  # fixes "Https;//" typo
+    url = (url or "").strip().replace(";", ":")
     if not url.startswith("http"):
         url = "https://" + url
     return url.rstrip("/")
 
-def make_session() -> requests.Session:
-    s = requests.Session()
-    retries = Retry(
-        total=5,
-        backoff_factor=1.0,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET", "HEAD", "OPTIONS"]
-    )
-    s.mount("https://", HTTPAdapter(max_retries=retries))
-    s.mount("http://", HTTPAdapter(max_retries=retries))
-    s.headers.update({"Accept": "application/json"})
-    if EMAIL:
-        # Jira Cloud (Basic auth: email + API token)
-        s.auth = HTTPBasicAuth(EMAIL, TOKEN)
-    else:
-        # Jira DC/Server with PAT (Bearer)
-        s.headers.update({"Authorization": f"Bearer {TOKEN}"})
-    return s
+def candidate_bases(url: str):
+    base = normalize_base(url)
+    bases = [base]
+    if "://jiira." in base:  # auto-correct common typo
+        bases.append(base.replace("://jiira.", "://jira."))
+    return bases
 
 def get_status(session: requests.Session, base: str, issue_key: str) -> str:
-    """
-    Tries Jira v3 endpoint first (Cloud), falls back to v2 (Server/DC).
-    Returns a human-readable status string or an error marker.
-    """
-    issue_key = issue_key.strip()
-    if not issue_key:
-        return ""
+    url = f"{base}/rest/api/2/issue/{issue_key}"
+    try:
+        r = session.get(url, params={"fields":"status"}, timeout=20, verify=VERIFY_SSL)
+    except requests.RequestException as e:
+        return f"ERROR: {e.__class__.__name__}"
 
-    params = {"fields": "status"}
-    endpoints = [
-        f"{base}/rest/api/3/issue/{issue_key}",
-        f"{base}/rest/api/2/issue/{issue_key}",
-    ]
+    # Non-200 handling
+    if r.status_code == 404:
+        return "NOT FOUND"
+    if r.status_code in (401, 403):
+        return f"AUTH ERROR ({r.status_code})"
+    if not (200 <= r.status_code < 300):
+        return f"HTTP {r.status_code}"
 
-    for url in endpoints:
-        try:
-            r = session.get(url, params=params, timeout=20)
-        except requests.RequestException as e:
-            return f"ERROR: {e.__class__.__name__}"
+    # Content-type guard (avoid HTML login pages)
+    ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if ctype != "application/json":
+        snippet = (r.text or "")[:160].lower()
+        if any(t in snippet for t in ["login", "log in", "atlassian", "sso", "csrf"]):
+            return "AUTH/SSO HTML"
+        return f"NON-JSON ({ctype or 'unknown'})"
 
-        if r.status_code == 404:
-            return "NOT FOUND"
-        if r.status_code == 401 or r.status_code == 403:
-            return f"AUTH ERROR ({r.status_code})"
-        if 200 <= r.status_code < 300:
-            try:
-                data = r.json()
-                status_name = (
-                    data.get("fields", {})
-                        .get("status", {})
-                        .get("name")
-                )
-                return status_name or "UNKNOWN"
-            except Exception:
-                return "PARSE ERROR"
+    try:
+        data = r.json()
+    except Exception:
+        return "PARSE ERROR"
 
-    return f"HTTP {r.status_code}"
+    # Jira error payloads
+    if isinstance(data, dict) and ("errorMessages" in data or "errors" in data):
+        msgs = []
+        if isinstance(data.get("errorMessages"), list):
+            msgs += data["errorMessages"]
+        if isinstance(data.get("errors"), dict):
+            msgs += [f"{k}: {v}" for k,v in data["errors"].items()]
+        return "JIRA ERROR: " + "; ".join(msgs) if msgs else "JIRA ERROR"
+
+    return (data.get("fields", {}).get("status", {}).get("name")) or "UNKNOWN"
 
 def main():
-    base = normalize_base(BASE_URL)
-    session = make_session()
+    bases = candidate_bases(BASE_URL)
 
-    # Load workbook and sheet
+    # --- session using PAT (Bearer) ---
+    s = requests.Session()
+    s.headers.update({
+        "Accept": "application/json",
+        "Authorization": f"Bearer {TOKEN}",
+    })
+    # If you need Basic instead of PAT, comment the line above and use:
+    # s.auth = (BASIC_USER, BASIC_PASS)
+
     try:
         wb = load_workbook("jira.xlsx")
     except FileNotFoundError:
-        print("ERROR: Could not find 'jira.xlsx' in the current directory.", file=sys.stderr)
+        print("ERROR: 'jira.xlsx' not found.", file=sys.stderr)
         sys.exit(1)
 
     ws = wb[SHEET_NAME] if SHEET_NAME and SHEET_NAME in wb.sheetnames else wb.worksheets[0]
 
-    # Optional: set header for column B if first row likely contains headers
-    # If you know row 1 is headers, uncomment next line:
-    # ws["B1"] = "Status"
-
-    # Iterate rows: from row 2 if header; else from row 1. We’ll auto-detect:
-    start_row = 2 if (ws["A1"].value and isinstance(ws["A1"].value, str) and ws["A1"].value.strip().lower() in {"key", "issue", "jira", "issue key"}) else 1
+    # header detection
+    has_header = isinstance(ws["A1"].value, str) and ws["A1"].value.strip().lower() in {"key","issue","jira","issue key"}
+    if ADD_STATUS_HEADER and has_header:
+        ws["B1"] = "Status"
+    start_row = 2 if has_header else 1
 
     updated = 0
     for row in range(start_row, ws.max_row + 1):
-        key_cell = ws.cell(row=row, column=1)
-        status_cell = ws.cell(row=row, column=2)
-
-        issue_key = (key_cell.value or "")
-        if not str(issue_key).strip():
-            # skip empty key rows
+        key = ws.cell(row=row, column=1).value
+        if not key:
+            continue
+        key = str(key).strip()
+        if not key:
             continue
 
-        status = get_status(session, base, str(issue_key))
-        status_cell.value = status
-        updated += 1
+        # try corrected host first if applicable
+        status = None
+        for base in bases:
+            status = get_status(s, base, key)
+            # stop early on a clear outcome
+            if status not in {"NON-JSON (unknown)", "PARSE ERROR"}:
+                break
 
-        # Be polite to the API if you have many issues (adjust/slower if needed)
+        ws.cell(row=row, column=2).value = status
+        updated += 1
         time.sleep(0.05)
 
     wb.save("jira.xlsx")
-    print(f"Done. Updated statuses for {updated} issues into column B of 'jira.xlsx'.")
+    print(f"Done. Updated {updated} rows (column B) using /rest/api/2.")
 
 if __name__ == "__main__":
     main()
