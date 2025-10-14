@@ -1,132 +1,64 @@
 #!/usr/bin/env python3
 """
-Append SonarQube hotspot comments to input.xlsx starting from column J.
+Append SonarQube hotspot comments (from 'comment' array) to input.xlsx starting at column J.
 
-Requirements:
+Install:
   pip install requests openpyxl
 
-Behavior:
-- Looks for 'key' column (case-insensitive) in row 1.
-- For each key, calls {BASE_URL}?hotspot=<key> using Basic Auth (token as username, blank password).
-- Extracts comments -> fields: key, login, htmlText, createdAt.
-- Writes to columns:
+What it does:
+- Reads 'key' from input.xlsx header row.
+- For each key, GET https://crm.sonsr.com/api/hotspots/show?hotspot=<key>
+  with Basic auth: token as username, empty password.
+- Expects JSON fields: key, component, project, rule, Changelog[], comment[].
+- From comment[], collects: key, login, htmlText, createdAt (robust to minor name variants).
+- Writes newline-joined values to columns J..M with headers:
     J: comment.key
     K: comment.login
     L: comment.htmlText
     M: comment.createdAt
-  If multiple comments exist, values are newline-joined in their respective cells.
-- Creates a safety backup: input_backup.xlsx
 """
 
 import os
-import shutil
 import sys
 import time
-from typing import List, Dict, Any, Tuple
+import shutil
+from typing import List, Dict, Any
 
 import requests
 from requests.auth import HTTPBasicAuth
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-# ==== Configuration ====
-INPUT_XLSX = "input.xlsx"  # file with a header row containing 'key'
-SHEET_NAME = None          # None = active sheet; or put the exact sheet name
-BASE_URL = "https://crm.sonsr.com/api/hotspots/show"  # canonical SonarQube endpoint path
-TOKEN = "sjrjdjdjdj"       # token as provided
-START_COL_INDEX = 10       # J = 10
-HEADERS_ROW = 1            # header row index (1-based)
-TIMEOUT = 30               # seconds
+# ================= Configuration =================
+INPUT_XLSX = "input.xlsx"          # workbook containing a header 'key'
+SHEET_NAME = None                  # None = active sheet; or set to your sheet name
+BASE_URL = "https://crm.sonsr.com/api/hotspots/show"
+TOKEN = "sjrjdjdjdj"               # <-- your token
+HEADERS_ROW = 1                    # where column headers live (1-based)
+START_COL_INDEX = 10               # J
+TIMEOUT = 30
 RETRY_COUNT = 3
-RETRY_BACKOFF = 2          # seconds (exponential)
-VERIFY_SSL = True          # set False only if your SSL is self-signed and you understand the risk
-# =======================
+RETRY_BACKOFF = 2
+VERIFY_SSL = True
+# =================================================
 
 def build_url(base_url: str, hotspot_key: str) -> str:
-    """
-    Build a valid SonarQube hotspot show URL.
-    Prefer '?hotspot=<key>' form. If user accidentally included 'hotspot=' already, replace value.
-    """
+    sep = "&" if "?" in base_url else "?"
+    # If the given base already contains "hotspot=", normalize by replacing value
     if "hotspot=" in base_url:
-        # Normalize existing pattern to '?hotspot=' style
-        # strip existing value and append new one
         prefix = base_url.split("hotspot=", 1)[0]
-        # Ensure there's exactly one '?'
         if "?" not in prefix:
             prefix = prefix.rstrip("/") + "?"
-        else:
-            # keep as is
-            pass
         return f"{prefix}hotspot={hotspot_key}"
-    else:
-        sep = "&" if "?" in base_url else "?"
-        return f"{base_url}{sep}hotspot={hotspot_key}"
-
-def fetch_comments(base_url: str, token: str, hotspot_key: str) -> List[Dict[str, Any]]:
-    """
-    Call SonarQube API to retrieve hotspot comments.
-    Returns a list of dicts with keys: key, login, htmlText, createdAt (if available).
-    """
-    url = build_url(base_url, hotspot_key)
-    last_exc = None
-    for attempt in range(1, RETRY_COUNT + 1):
-        try:
-            resp = requests.get(
-                url,
-                auth=HTTPBasicAuth(token, ""),  # SonarQube: token as username, empty password
-                timeout=TIMEOUT,
-                verify=VERIFY_SSL,
-            )
-            if resp.status_code == 401:
-                raise RuntimeError("Unauthorized (401): Check TOKEN.")
-            if resp.status_code == 404:
-                # hotspot not found – return empty comments
-                return []
-            resp.raise_for_status()
-            data = resp.json()
-
-            # Try to locate comments list in typical shapes
-            comments = []
-            # 1) direct: {"comments":[ {...}, ... ]}
-            if isinstance(data, dict) and isinstance(data.get("comments"), list):
-                comments = data["comments"]
-            # 2) nested under hotspot: {"hotspot": {..., "comments":[...]}}
-            elif isinstance(data, dict) and isinstance(data.get("hotspot"), dict):
-                h = data["hotspot"]
-                if isinstance(h.get("comments"), list):
-                    comments = h["comments"]
-
-            # Normalize fields
-            out = []
-            for c in comments:
-                out.append({
-                    "key": c.get("key") or c.get("id") or "",
-                    "login": c.get("login") or c.get("author") or "",
-                    "htmlText": c.get("htmlText") or c.get("text") or c.get("html") or "",
-                    "createdAt": c.get("createdAt") or c.get("created_at") or c.get("created") or "",
-                })
-            return out
-
-        except Exception as e:
-            last_exc = e
-            if attempt < RETRY_COUNT:
-                time.sleep(RETRY_BACKOFF ** (attempt - 1))
-            else:
-                # On final failure, surface error by returning a single "error" comment row
-                return [{
-                    "key": "",
-                    "login": "",
-                    "htmlText": f"[ERROR] {type(e).__name__}: {e}",
-                    "createdAt": "",
-                }]
-    # Shouldn't reach here
-    raise last_exc  # type: ignore
+    return f"{base_url}{sep}hotspot={hotspot_key}"
 
 def find_header_column(ws, header_name: str, header_row: int = 1) -> int:
-    name_lower = header_name.strip().lower()
-    for col_idx, cell in enumerate(ws[header_row], start=1):
-        if str(cell.value).strip().lower() == name_lower:
-            return col_idx
+    target = header_name.strip().lower()
+    for idx, cell in enumerate(ws[header_row], start=1):
+        if cell.value is None:
+            continue
+        if str(cell.value).strip().lower() == target:
+            return idx
     raise ValueError(f"Header '{header_name}' not found in row {header_row}.")
 
 def ensure_output_headers(ws, start_col: int, header_row: int = 1):
@@ -134,28 +66,99 @@ def ensure_output_headers(ws, start_col: int, header_row: int = 1):
     for i, h in enumerate(headers):
         ws.cell(row=header_row, column=start_col + i, value=h)
 
-def write_comments_to_row(ws, row: int, start_col: int, comments: List[Dict[str, Any]]):
-    """Write newline-joined comment fields into columns J..M for the given row."""
-    def join_field(field: str) -> str:
-        return "\n".join([str(c.get(field, "") or "") for c in comments if c is not None]) if comments else ""
+def normalize_created_at(c: Dict[str, Any]) -> str:
+    # Accept common variants
+    return (
+        c.get("createdAt")
+        or c.get("created at")
+        or c.get("created_at")
+        or c.get("created")
+        or ""
+    )
 
-    ws.cell(row=row, column=start_col + 0, value=join_field("key"))
-    ws.cell(row=row, column=start_col + 1, value=join_field("login"))
-    ws.cell(row=row, column=start_col + 2, value=join_field("htmlText"))
-    ws.cell(row=row, column=start_col + 3, value=join_field("createdAt"))
+def parse_comments_from_payload(data: Any) -> List[Dict[str, Any]]:
+    """
+    Extract comment list from the actual payload shape.
+    Primary path: data["comment"] (array).
+    Fallbacks: data["comments"], data["hotspot"]["comment"] / ["comments"]
+    """
+    comments = []
+    if isinstance(data, dict):
+        if isinstance(data.get("comment"), list):
+            comments = data["comment"]
+        elif isinstance(data.get("comments"), list):
+            comments = data["comments"]
+        elif isinstance(data.get("hotspot"), dict):
+            h = data["hotspot"]
+            if isinstance(h.get("comment"), list):
+                comments = h["comment"]
+            elif isinstance(h.get("comments"), list):
+                comments = h["comments"]
+
+    out = []
+    for c in comments or []:
+        if not isinstance(c, dict):
+            continue
+        out.append({
+            "key": c.get("key") or c.get("id") or "",
+            "login": c.get("login") or c.get("author") or "",
+            "htmlText": c.get("htmlText") or c.get("text") or c.get("html") or "",
+            "createdAt": normalize_created_at(c),
+        })
+    return out
+
+def fetch_comments(hotspot_key: str) -> List[Dict[str, Any]]:
+    url = build_url(BASE_URL, hotspot_key)
+    last_exc = None
+    for attempt in range(1, RETRY_COUNT + 1):
+        try:
+            r = requests.get(
+                url,
+                auth=HTTPBasicAuth(TOKEN, ""),
+                timeout=TIMEOUT,
+                verify=VERIFY_SSL,
+            )
+            if r.status_code == 401:
+                raise RuntimeError("Unauthorized (401) — check TOKEN.")
+            if r.status_code == 404:
+                return []  # no such hotspot
+            r.raise_for_status()
+            payload = r.json()
+            return parse_comments_from_payload(payload)
+        except Exception as e:
+            last_exc = e
+            if attempt < RETRY_COUNT:
+                time.sleep(RETRY_BACKOFF ** (attempt - 1))
+            else:
+                # Place an error marker in htmlText; keeps rows aligned
+                return [{
+                    "key": "",
+                    "login": "",
+                    "htmlText": f"[ERROR] {type(e).__name__}: {e}",
+                    "createdAt": "",
+                }]
+    raise last_exc  # pragma: no cover
+
+def write_comments_to_row(ws, row: int, start_col: int, comments: List[Dict[str, Any]]):
+    join = lambda field: "\n".join(
+        str(c.get(field, "") or "") for c in (comments or [])
+    )
+    ws.cell(row=row, column=start_col + 0, value=join("key"))
+    ws.cell(row=row, column=start_col + 1, value=join("login"))
+    ws.cell(row=row, column=start_col + 2, value=join("htmlText"))
+    ws.cell(row=row, column=start_col + 3, value=join("createdAt"))
 
 def main():
     if not os.path.exists(INPUT_XLSX):
-        print(f"ERROR: '{INPUT_XLSX}' not found in current directory: {os.getcwd()}", file=sys.stderr)
+        print(f"ERROR: '{INPUT_XLSX}' not found in {os.getcwd()}", file=sys.stderr)
         sys.exit(1)
 
     # Safety backup
-    backup_path = "input_backup.xlsx"
     try:
-        shutil.copyfile(INPUT_XLSX, backup_path)
-        print(f"Backup created: {backup_path}")
+        shutil.copyfile(INPUT_XLSX, "input_backup.xlsx")
+        print("Backup created: input_backup.xlsx")
     except Exception as e:
-        print(f"WARNING: Could not create backup: {e}")
+        print(f"WARNING: backup failed: {e}")
 
     wb = load_workbook(INPUT_XLSX)
     ws = wb[SHEET_NAME] if SHEET_NAME else wb.active
@@ -168,25 +171,24 @@ def main():
 
     ensure_output_headers(ws, START_COL_INDEX, header_row=HEADERS_ROW)
 
-    # Iterate rows after header
     max_row = ws.max_row
     processed = 0
     for row in range(HEADERS_ROW + 1, max_row + 1):
-        hotspot_key = ws.cell(row=row, column=key_col).value
-        if hotspot_key is None:
+        rk = ws.cell(row=row, column=key_col).value
+        if rk is None:
             continue
-        hotspot_key = str(hotspot_key).strip()
+        hotspot_key = str(rk).strip()
         if not hotspot_key:
             continue
 
-        comments = fetch_comments(BASE_URL, TOKEN, hotspot_key)
+        comments = fetch_comments(hotspot_key)
         write_comments_to_row(ws, row, START_COL_INDEX, comments)
         processed += 1
 
     wb.save(INPUT_XLSX)
     j = get_column_letter(START_COL_INDEX)
     m = get_column_letter(START_COL_INDEX + 3)
-    print(f"Done. Wrote comment fields to columns {j}:{m} for {processed} key(s).")
+    print(f"Done. Wrote comment fields to {j}:{m} for {processed} key(s).")
 
 if __name__ == "__main__":
     main()
